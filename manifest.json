@@ -8,6 +8,42 @@
   "homepage": "https://github.com/zachwilke/omarchy-mxcontrol",
   "repository": "https://github.com/zachwilke/omarchy-mxcontrol.git",
   "description": "Logi Options+ for the Omarchy bar. Control Logitech MX mice and keyboards over Bluetooth, USB, Bolt, or Unifying.",
+  "dependencies": {
+    "required": [
+      {
+        "name": "Omarchy",
+        "version": ">=4.0",
+        "purpose": "Quattro / omarchy-shell plugin host (Quickshell)"
+      },
+      {
+        "name": "python3",
+        "package": "python",
+        "purpose": "Runs mxctl.py (stdlib only unless Solaar is installed)"
+      },
+      {
+        "name": "bash",
+        "package": "bash",
+        "purpose": "Creates the runtime directory and optional udev helper command"
+      }
+    ],
+    "optional": [
+      {
+        "name": "Solaar",
+        "package": "solaar",
+        "license": "GPL-2.0-or-later",
+        "purpose": "HID++ via logitech_receiver; udev rules for /dev/hidraw*"
+      },
+      {
+        "name": "BlueZ",
+        "package": "bluez",
+        "purpose": "Bluetooth battery overlay when HID++ is not open"
+      },
+      {
+        "name": "systemd / udev",
+        "purpose": "Optional user-initiated udevadm reload for hidraw permissions"
+      }
+    ]
+  },
   "kinds": [
     "bar-widget"
   ],

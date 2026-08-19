@@ -98,21 +98,55 @@ Settings live on the bar layout entry in `~/.config/omarchy/shell.json`. The plu
 | `refreshIntervalSec` | `120` | How often to rescan hidraw when the helper is idle |
 | `selectedDevice` | `""` | Preferred device id; empty prefers the mouse |
 
-## Dependencies
+## External dependencies
 
-| Dependency | Required | Why |
+Nothing is installed automatically. `omarchy plugin add` only clones this repo.
+
+### Required (already on Omarchy)
+
+| Dependency | Package | Used for |
 | --- | --- | --- |
-| Omarchy 4 / Quattro | Yes | Plugin host |
-| Python 3 | Yes | Ships with Arch |
-| [Solaar](https://github.com/pwr-Solaar/Solaar) | For writes | HID++ read/write via `logitech_receiver` |
+| Omarchy 4 / Quattro | `omarchy` | Hosts the plugin inside `omarchy-shell` (Quickshell). No second Quickshell process. |
+| Python 3 | `python` | Runs `mxctl.py`. Only the stdlib is imported unless Solaar is present. |
+| bash | `bash` | `mkdir` for `$XDG_RUNTIME_DIR/omarchy-mx/` and the optional udev command line. |
 
-Install Solaar with `omarchy pkg add solaar`. The panel can open that command in a terminal for you.
+### Optional
 
-## Privileges
+| Dependency | Package | License | Used for |
+| --- | --- | --- | --- |
+| [Solaar](https://github.com/pwr-Solaar/Solaar) | `solaar` (Arch extra) | GPL-2.0-or-later | HID++ read/write through `logitech_receiver` and `solaar.configuration`. Also ships the udev rules that make `/dev/hidraw*` user-accessible. |
+| BlueZ | `bluez` | GPL-2.0-or-later | Battery overlay via `Quickshell.Bluetooth` when the HID++ helper is not open. |
+| udev | `systemd` | LGPL-2.1-or-later | Only if you click **Reload udev**. |
 
-The helper talks to `/dev/hidraw*` as your user. Solaar’s udev rules grant that access. The plugin never launches a second Quickshell process and never writes system files on install.
+Install Solaar yourself:
 
-The optional **Reload udev** button opens a terminal so *you* can enter a password for `udevadm`. That is the only privileged path, and it is never run automatically.
+```sh
+omarchy pkg add solaar
+```
+
+The panel’s **Install Solaar** button runs that same command in a terminal (`omarchy-launch-tui`). It does not install packages silently.
+
+### Commands this plugin may start
+
+| Command | When | Privilege |
+| --- | --- | --- |
+| `python3 mxctl.py discover` | Periodic hidraw scan | User |
+| `python3 mxctl.py serve` | After you open the panel (keeps hidraw open) | User |
+| `python3 mxctl.py cleanup` | Plugin unload / remove | User |
+| `omarchy-launch-tui omarchy pkg add solaar` | **Install Solaar** button | User; you confirm the package install |
+| `omarchy-launch-tui sudo bash -lc 'udevadm control --reload-rules && udevadm trigger'` | **Reload udev** button | You type your password in a terminal. Never run automatically. |
+
+No pip packages, no AUR-only packages, no remote downloads, no install hooks.
+
+### Runtime files
+
+`$XDG_RUNTIME_DIR/omarchy-mx/` (`status.json`, `cmd.json`, `mxctl.lock`) is created as your user and deleted by `mxctl.py cleanup` when the plugin unloads.
+
+### Privileges
+
+The helper talks to `/dev/hidraw*` as your user. Solaar’s udev rules grant that access after you install Solaar and reconnect the device. The plugin never writes `/etc`, never edits `~/.config/hypr/`, and never starts a second Quickshell process.
+
+`~/.config/solaar/` is Solaar’s own store. This plugin may update it when you change a setting (through Solaar’s library). Removal does not delete that directory.
 
 ## Develop
 
