@@ -30,6 +30,12 @@ function hidDisplayName(item, fallback) {
   return plainHidText(raw)
 }
 
+function runtimeDir(xdgRuntimeDir, uid) {
+  var dir = xdgRuntimeDir === undefined || xdgRuntimeDir === null ? "" : String(xdgRuntimeDir)
+  if (dir !== "") return dir + "/omarchy-mx"
+  return "/run/user/" + String(uid || "") + "/omarchy-mx"
+}
+
 function parseStatus(raw) {
   var text = String(raw || "").trim()
   if (text === "") return emptyStatus("No response from mxctl")
@@ -542,6 +548,7 @@ if (typeof module !== "undefined") {
     smartShiftState: smartShiftState,
     remainingSettings: remainingSettings,
     plainHidText: plainHidText,
-    hidDisplayName: hidDisplayName
+    hidDisplayName: hidDisplayName,
+    runtimeDir: runtimeDir
   }
 }

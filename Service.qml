@@ -25,10 +25,13 @@ Item {
   property var pendingWrites: []
   property string selectedId: ""
 
-  readonly property string runtimeDir: {
-    var dir = Quickshell.env("XDG_RUNTIME_DIR")
-    return dir && dir !== "" ? dir + "/omarchy-mx" : "/tmp/omarchy-mx"
+  property string probedUid: ""
+  readonly property string runtimeUid: {
+    var uid = Quickshell.env("UID")
+    if (uid && /^\d+$/.test(String(uid))) return String(uid)
+    return probedUid
   }
+  readonly property string runtimeDir: Model.runtimeDir(Quickshell.env("XDG_RUNTIME_DIR"), runtimeUid)
   readonly property string statusPath: runtimeDir + "/status.json"
   readonly property string cmdPath: runtimeDir + "/cmd.json"
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 120, 10, 3600)
@@ -145,13 +148,8 @@ Item {
 
   function writeCmd(cmd) {
     if (cmdProcess.running) return
-    var json = JSON.stringify(cmd)
-    cmdProcess.command = ["bash", "-lc", "mkdir -p -- " + shellQuote(runtimeDir) + " && printf %s " + shellQuote(json) + " > " + shellQuote(cmdPath)]
+    cmdProcess.command = ["python3", helperPath, "write-cmd", JSON.stringify(cmd)]
     cmdProcess.running = true
-  }
-
-  function shellQuote(value) {
-    return "'" + String(value || "").replace(/'/g, "'\\''") + "'"
   }
 
   function installSolaar() {
@@ -192,9 +190,28 @@ Item {
   }
 
   Process {
+    id: uidProbe
+    running: {
+      var dir = Quickshell.env("XDG_RUNTIME_DIR")
+      if (dir && dir !== "") return false
+      var uid = Quickshell.env("UID")
+      if (uid && /^\d+$/.test(String(uid))) return false
+      return root.probedUid === ""
+    }
+    command: ["id", "-u"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var uid = String(text).trim()
+        if (/^\d+$/.test(uid)) root.probedUid = uid
+      }
+    }
+  }
+
+  Process {
     id: mkdirProcess
     running: false
-    command: ["bash", "-lc", "mkdir -p -- " + root.shellQuote(root.runtimeDir)]
+    command: ["python3", root.helperPath, "runtime-dir"]
   }
 
   Timer {

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import logging
@@ -539,27 +540,80 @@ def load_settings(mods, dev) -> list[dict]:
     return settings
 
 
+def runtime_path(xdg_runtime_dir: str | None, uid: int) -> str:
+    if xdg_runtime_dir:
+        return f"{xdg_runtime_dir}/omarchy-mx"
+    return f"/run/user/{uid}/omarchy-mx"
+
+
 def runtime_dir() -> Path:
-    base = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    path = Path(base) / "omarchy-mx"
+    path = Path(runtime_path(os.environ.get("XDG_RUNTIME_DIR"), os.getuid()))
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
     return path
+
+
+def _is_nofollow_error(exc: OSError) -> bool:
+    return exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", errno.ELOOP))
+
+
+def _create_exclusive(path: Path, data: bytes) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    try:
+        fd = os.open(tmp, flags, 0o600)
+    except FileExistsError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        fd = os.open(tmp, flags, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+
+def write_bytes(path: Path, data: bytes) -> None:
+    """Write without following a planted symlink. Keep a regular file in place."""
+    flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_TRUNC
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        _create_exclusive(path, data)
+        return
+    except OSError as exc:
+        if not _is_nofollow_error(exc):
+            raise
+        path.unlink()
+        _create_exclusive(path, data)
+        return
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
 
 
 def atomic_write(path: Path, payload: dict) -> None:
     text = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
-    # Write in place when the file already exists so FileView's inode watch
-    # sees IN_MODIFY. A replace() would swap the inode and miss the panel.
-    if path.exists():
-        path.write_text(text, encoding="utf-8")
-        return
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    write_bytes(path, text.encode("utf-8"))
 
 
 def acquire_lock(blocking: bool = True):
-    handle = open(runtime_dir() / "mxctl.lock", "a+")
+    path = runtime_dir() / "mxctl.lock"
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        if not _is_nofollow_error(exc):
+            raise
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        fd = os.open(path, flags, 0o600)
+    handle = os.fdopen(fd, "r+")
     try:
         fcntl.flock(handle, fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB))
     except OSError:
@@ -920,6 +974,26 @@ def apply_cmd(mods, opened, cmd: dict) -> None:
     apply_setting(setting, None if key in ("", None) else key, value)
 
 
+def write_cmd_command(argv: list[str]) -> None:
+    raw = argv[0] if argv else sys.stdin.read()
+    if not str(raw).strip():
+        fail("missing command json")
+    try:
+        cmd = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        fail(f"invalid command json: {exc}")
+    if not isinstance(cmd, dict):
+        fail("command json must be an object")
+    path = runtime_dir() / "cmd.json"
+    atomic_write(path, cmd)
+    emit({"ok": True, "path": str(path)})
+
+
+def runtime_dir_command() -> None:
+    sys.stdout.write(str(runtime_dir()) + "\n")
+    raise SystemExit(0)
+
+
 def cleanup_command() -> None:
     paths = runtime_dir()
     lock = None
@@ -1029,6 +1103,10 @@ def main() -> None:
         emit(discover_payload())
     if action == "cleanup":
         cleanup_command()
+    if action == "write-cmd":
+        write_cmd_command(argv[1:])
+    if action == "runtime-dir":
+        runtime_dir_command()
     if action == "serve":
         serve_command()
         raise SystemExit(0)

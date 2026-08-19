@@ -23,7 +23,7 @@
       {
         "name": "bash",
         "package": "bash",
-        "purpose": "Creates the runtime directory and optional udev helper command"
+        "purpose": "Optional udev reload command line"
       }
     ],
     "optional": [

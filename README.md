@@ -49,7 +49,7 @@ omarchy plugin disable io.github.zachwilke.mx
 omarchy plugin remove io.github.zachwilke.mx
 ```
 
-Removal deletes the plugin checkout and takes the widget out of the bar. On unload the helper stops and clears `$XDG_RUNTIME_DIR/omarchy-mx/` (status, command, and lock files).
+Removal deletes the plugin checkout and takes the widget out of the bar. On unload the helper stops and clears the private runtime directory (`$XDG_RUNTIME_DIR/omarchy-mx/` or `/run/user/$UID/omarchy-mx/`).
 
 Left in place on purpose:
 
@@ -108,7 +108,7 @@ Nothing is installed automatically. `omarchy plugin add` only clones this repo.
 | --- | --- | --- |
 | Omarchy 4 / Quattro | `omarchy` | Hosts the plugin inside `omarchy-shell` (Quickshell). No second Quickshell process. |
 | Python 3 | `python` | Runs `mxctl.py`. Only the stdlib is imported unless Solaar is present. |
-| bash | `bash` | `mkdir` for `$XDG_RUNTIME_DIR/omarchy-mx/` and the optional udev command line. |
+| bash | `bash` | Optional **Reload udev** command line only. |
 
 ### Optional
 
@@ -132,6 +132,8 @@ The panel’s **Install Solaar** button runs that same command in a terminal (`o
 | --- | --- | --- |
 | `python3 mxctl.py discover` | Periodic hidraw scan | User |
 | `python3 mxctl.py serve` | After you open the panel (keeps hidraw open) | User |
+| `python3 mxctl.py write-cmd` | Panel setting changes (writes `cmd.json`) | User |
+| `python3 mxctl.py runtime-dir` | Creates the private runtime directory | User |
 | `python3 mxctl.py cleanup` | Plugin unload / remove | User |
 | `omarchy-launch-tui omarchy pkg add solaar` | **Install Solaar** button | User; you confirm the package install |
 | `omarchy-launch-tui sudo bash -lc 'udevadm control --reload-rules && udevadm trigger'` | **Reload udev** button | You type your password in a terminal. Never run automatically. |
@@ -140,7 +142,7 @@ No pip packages, no AUR-only packages, no remote downloads, no install hooks.
 
 ### Runtime files
 
-`$XDG_RUNTIME_DIR/omarchy-mx/` (`status.json`, `cmd.json`, `mxctl.lock`) is created as your user and deleted by `mxctl.py cleanup` when the plugin unloads.
+`$XDG_RUNTIME_DIR/omarchy-mx/` when that variable is set, otherwise `/run/user/$UID/omarchy-mx/` (`status.json`, `cmd.json`, `mxctl.lock`). Created mode `0700` as your user. Never `/tmp`. Deleted by `mxctl.py cleanup` when the plugin unloads.
 
 ### Privileges
 
