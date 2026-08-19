@@ -7,7 +7,7 @@ A first-class Quattro plugin for Logitech MX mice and keyboards — MX Master, A
 It lives inside the long-running `omarchy-shell` process. It never starts a second Quickshell instance.
 
 <p align="center">
-  <img src="preview.png" alt="MX Control on the Omarchy bar" width="720">
+  <img src="preview.png" alt="MX Control panel on Omarchy: MX Master 3S over Bluetooth, 1000 DPI with 8K preset, SmartShift, invert scroll, and high-resolution scroll" width="420">
 </p>
 
 ## Install
