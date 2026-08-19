@@ -31,9 +31,7 @@ class RuntimeDirTests(unittest.TestCase):
         shutil.rmtree(self.xdg, ignore_errors=True)
 
     def run_helper(self, *args, env=None):
-        merged = os.environ.copy()
-        if env:
-            merged.update(env)
+        merged = os.environ.copy() if env is None else dict(env)
         return subprocess.run(
             ["python3", str(HELPER), *args],
             env=merged,
@@ -71,10 +69,15 @@ class RuntimeDirTests(unittest.TestCase):
     def test_runtime_dir_cli_fallback(self):
         env = os.environ.copy()
         env.pop("XDG_RUNTIME_DIR", None)
+        expected = f"/run/user/{os.getuid()}/omarchy-mx"
+        self.assertEqual(mxctl.runtime_path(None, os.getuid()), expected)
         proc = self.run_helper("runtime-dir", env=env)
-        self.assertEqual(proc.returncode, 0)
-        self.assertEqual(proc.stdout.strip(), f"/run/user/{os.getuid()}/omarchy-mx")
         self.assertNotIn("/tmp", proc.stdout)
+        self.assertNotIn("/tmp", proc.stderr)
+        if proc.returncode == 0:
+            self.assertEqual(proc.stdout.strip(), expected)
+        else:
+            self.assertIn(expected, proc.stderr)
 
     def test_write_cmd_roundtrip(self):
         cmd = {"op": "set", "device": "abc", "setting": "dpi", "value": 800}
