@@ -1,0 +1,7 @@
+*~
+*.qmlc
+*.jsc
+.qmllint.ini
+__pycache__/
+*.pyc
+.DS_Store
