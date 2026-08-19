@@ -1,3 +1,7 @@
+var HID_AMP_RE = /&/g
+var HID_LT_RE = /</g
+var HID_GT_RE = />/g
+
 function emptyStatus(message) {
   return {
     ok: false,
@@ -7,6 +11,23 @@ function emptyStatus(message) {
     devices: [],
     adapters: []
   }
+}
+
+// HID identity is untrusted peripheral data. Escape so leftover RichText /
+// AutoText / StyledText surfaces cannot treat a crafted name as markup.
+function plainHidText(value) {
+  if (value === undefined || value === null) return ""
+  var text = String(value)
+  if (text.indexOf("&") === -1 && text.indexOf("<") === -1 && text.indexOf(">") === -1)
+    return text
+  return text.replace(HID_AMP_RE, "&amp;").replace(HID_LT_RE, "&lt;").replace(HID_GT_RE, "&gt;")
+}
+
+function hidDisplayName(item, fallback) {
+  var raw = ""
+  if (item && item.name) raw = item.name
+  else if (fallback !== undefined && fallback !== null) raw = fallback
+  return plainHidText(raw)
 }
 
 function parseStatus(raw) {
@@ -142,7 +163,7 @@ function batteryPercent(device) {
 function batteryLabel(device) {
   var percent = batteryPercent(device)
   if (percent >= 0) return percent + "%"
-  if (device && device.battery && device.battery.text) return String(device.battery.text)
+  if (device && device.battery && device.battery.text) return plainHidText(device.battery.text)
   return ""
 }
 
@@ -472,7 +493,7 @@ function hostOptions(device) {
       var host = hosts[i]
       options.push({
         value: String(host.index),
-        label: host.name ? String(host.name) : ("Channel " + (Number(host.index) + 1)),
+        label: host.name ? plainHidText(host.name) : ("Channel " + (Number(host.index) + 1)),
         tooltip: host.paired === false ? "Not paired" : ""
       })
     }
@@ -519,6 +540,8 @@ if (typeof module !== "undefined") {
     batteryPercent: batteryPercent,
     batteryLabel: batteryLabel,
     smartShiftState: smartShiftState,
-    remainingSettings: remainingSettings
+    remainingSettings: remainingSettings,
+    plainHidText: plainHidText,
+    hidDisplayName: hidDisplayName
   }
 }

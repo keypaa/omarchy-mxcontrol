@@ -59,6 +59,14 @@ def hid_name_from_uevent(text: str) -> str:
     return ""
 
 
+def plain_hid_text(value: str) -> str:
+    """HID identity is untrusted. Strip markup so QML AutoText cannot fetch URLs."""
+    text = str(value or "")
+    if "<" not in text and ">" not in text:
+        return text
+    return text.replace("<", "").replace(">", "")
+
+
 def hid_id_from_uevent(text: str) -> tuple[str, str]:
     for line in text.splitlines():
         if line.startswith("HID_ID="):
@@ -204,7 +212,7 @@ def scan_hidraw() -> tuple[list[dict], list[dict]]:
             adapters.append(
                 {
                     "id": adapter_id,
-                    "name": name or kind.title() + " receiver",
+                    "name": plain_hid_text(name) or kind.title() + " receiver",
                     "kind": kind if kind in {"bolt", "unifying", "lightspeed", "nano"} else "receiver",
                     "productId": product,
                     "path": node,
@@ -225,8 +233,8 @@ def scan_hidraw() -> tuple[list[dict], list[dict]]:
         devices.append(
             {
                 "id": uniq or entry.name,
-                "name": name,
-                "codename": name,
+                "name": plain_hid_text(name),
+                "codename": plain_hid_text(name),
                 "kind": kind_from_name(name),
                 "online": True,
                 "path": node,
@@ -390,7 +398,7 @@ def hosts_payload(dev) -> list[dict]:
     hosts = []
     for index, info in names.items():
         paired, name = info if isinstance(info, tuple) and len(info) >= 2 else (False, str(info))
-        hosts.append({"index": int(index), "name": str(name or f"Host {index}"), "paired": bool(paired)})
+        hosts.append({"index": int(index), "name": plain_hid_text(str(name or f"Host {index}")), "paired": bool(paired)})
     return hosts
 
 
@@ -580,8 +588,8 @@ def describe_device(mods, dev, full: bool = True) -> dict | None:
         adapter = str(getattr(recv, "name", "") or receiver_connection(dev) or "")
     payload = {
         "id": device_id(dev),
-        "name": name,
-        "codename": str(getattr(dev, "codename", "") or name),
+        "name": plain_hid_text(name),
+        "codename": plain_hid_text(str(getattr(dev, "codename", "") or name)),
         "kind": kind,
         "online": online,
         "path": path,
@@ -595,7 +603,7 @@ def describe_device(mods, dev, full: bool = True) -> dict | None:
         "hosts": hosts_payload(dev) if online and full else [],
         "settings": load_settings(mods, dev) if online and full else [],
         "readonly": False,
-        "adapter": adapter,
+        "adapter": plain_hid_text(adapter),
     }
     return payload
 
