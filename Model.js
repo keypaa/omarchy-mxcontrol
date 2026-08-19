@@ -325,9 +325,12 @@ function patchDeviceSetting(devices, deviceId, name, value, key) {
 }
 
 var SETTING_HELP = {
-  "dpi": "How far the pointer travels. Higher DPI covers more of the screen with less hand movement.",
-  "dpi-extended": "How far the pointer travels. Higher DPI covers more of the screen with less hand movement.",
-  "dpi_extended": "How far the pointer travels. Higher DPI covers more of the screen with less hand movement.",
+  "dpi": "How far the pointer travels, in 50 DPI steps from 200 to 8000. 8K is the sensor maximum (8000 DPI).",
+  "dpi-extended": "How far the pointer travels. 8K is the sensor maximum when the device supports 8000 DPI.",
+  "dpi_extended": "How far the pointer travels. 8K is the sensor maximum when the device supports 8000 DPI.",
+  "report_rate": "How often the mouse reports movement, in Hz. 8K is 8000 Hz when the device supports it.",
+  "report-rate": "How often the mouse reports movement, in Hz. 8K is 8000 Hz when the device supports it.",
+  "report_rate_extended": "How often the mouse reports movement, in Hz. 8K is 8000 Hz when the device supports it.",
   "pointer_speed": "A software pointer-speed multiplier on top of the hardware DPI.",
   "pointer-speed": "A software pointer-speed multiplier on top of the hardware DPI.",
   "scroll-ratchet": "When on, the MagSpeed wheel clicks at slow speeds and free-spins when you scroll quickly. Off is always free-spin.",
@@ -346,10 +349,65 @@ var SETTING_HELP = {
   "fn_swap": "When on, the F-keys send media and special actions by default. Hold Fn for F1–F12.",
   "backlight": "Keyboard lighting on or off.",
   "backlight_level": "How bright the keyboard backlight is.",
-  "backlight-level": "How bright the keyboard backlight is.",
-  "report_rate": "How often the device reports movement. Higher is snappier and uses a bit more power.",
-  "report-rate": "How often the device reports movement. Higher is snappier and uses a bit more power.",
-  "report_rate_extended": "How often the device reports movement. Higher is snappier and uses a bit more power."
+  "backlight-level": "How bright the keyboard backlight is."
+}
+
+function choiceNumericValues(setting) {
+  var choices = setting && setting.choices ? setting.choices : []
+  var nums = []
+  for (var i = 0; i < choices.length; i++) {
+    var item = choices[i]
+    var n = Number(item && item.id !== undefined ? item.id : (item && item.name !== undefined ? item.name : item))
+    if (isFinite(n)) nums.push(n)
+  }
+  nums.sort(function(a, b) { return a - b })
+  return nums
+}
+
+function sliderBounds(setting) {
+  if (!setting) return { min: 0, max: 100, step: 1 }
+  if (setting.kind === "range" && setting.min !== undefined && setting.min !== null)
+    return { min: Number(setting.min), max: Number(setting.max), step: 1 }
+  var nums = choiceNumericValues(setting)
+  if (nums.length === 0) return { min: 0, max: 100, step: 1 }
+  var step = nums.length > 1 ? nums[1] - nums[0] : 1
+  return { min: nums[0], max: nums[nums.length - 1], step: step > 0 ? step : 1, values: nums }
+}
+
+function snapToChoices(setting, value) {
+  var nums = choiceNumericValues(setting)
+  if (nums.length === 0) return Math.round(value)
+  var best = nums[0]
+  var bestD = Math.abs(value - best)
+  for (var i = 1; i < nums.length; i++) {
+    var d = Math.abs(value - nums[i])
+    if (d < bestD) {
+      best = nums[i]
+      bestD = d
+    }
+  }
+  return best
+}
+
+function dpiPresets(setting) {
+  var wanted = [400, 800, 1200, 1600, 3200, 8000]
+  var nums = choiceNumericValues(setting)
+  if (nums.length === 0) {
+    var bounds = sliderBounds(setting)
+    nums = []
+    for (var n = bounds.min; n <= bounds.max; n += Math.max(1, bounds.step)) nums.push(n)
+  }
+  var have = {}
+  for (var i = 0; i < nums.length; i++) have[nums[i]] = true
+  var options = []
+  for (var j = 0; j < wanted.length; j++) {
+    if (!have[wanted[j]]) continue
+    options.push({
+      value: String(wanted[j]),
+      label: wanted[j] >= 8000 ? "8K" : String(wanted[j])
+    })
+  }
+  return options
 }
 
 function helpForSetting(setting, fallback) {

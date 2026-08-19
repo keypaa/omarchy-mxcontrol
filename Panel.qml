@@ -176,9 +176,10 @@ Panel {
     cursorActive = true
     ensureCursor()
     if (focusSection === "pointer" && dx !== 0 && dpiSetting && cursorIndex === 0) {
-      var next = Model.numericValue(dpiSetting, 1000) + dx * Math.max(50, Number(dpiSetting.step || 50))
-      next = Math.max(Number(dpiSetting.min || 200), Math.min(Number(dpiSetting.max || 8000), next))
-      writeSetting(dpiSetting, Math.round(next))
+      var bounds = Model.sliderBounds(dpiSetting)
+      var next = Model.numericValue(dpiSetting, bounds.min) + dx * bounds.step
+      next = Math.max(bounds.min, Math.min(bounds.max, next))
+      writeSetting(dpiSetting, Model.snapToChoices(dpiSetting, next))
       return
     }
     if (dy === 0) return
@@ -431,10 +432,72 @@ Panel {
               width: parent.width
               title: "Sensitivity"
               subtitle: dpiSetting ? (Math.round(Model.numericValue(dpiSetting, 0)) + " DPI") : ""
-              info: Model.helpForSetting(dpiSetting, "How far the pointer travels. Higher DPI covers more screen with less movement.")
+              info: Model.helpForSetting(dpiSetting, "How far the pointer travels. 8K is 8000 DPI, the MX sensor maximum.")
               setting: dpiSetting
+              formatValue: function(v) { return Math.round(v) + " DPI" }
               hasCursor: root.cursorActive && root.focusSection === "pointer" && root.cursorIndex === 0
               onHoveredIn: root.setCursor("pointer", 0)
+            }
+
+            Row {
+              visible: dpiSetting && Model.dpiPresets(dpiSetting).length > 0
+              width: parent.width
+              spacing: Style.space(8)
+
+              Text {
+                text: "Presets"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              InfoHint {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Jump to a common DPI. 8K is 8000 DPI — the same maximum Options+ offers on MX Master 3S."
+              }
+
+              Item { width: Math.max(0, 1); height: 1 }
+            }
+
+            ButtonGroup {
+              visible: dpiSetting && Model.dpiPresets(dpiSetting).length > 0
+              width: parent.width
+              options: dpiSetting ? Model.dpiPresets(dpiSetting) : []
+              value: dpiSetting ? String(Math.round(Model.numericValue(dpiSetting, 0))) : ""
+              foreground: root.foreground
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onChanged: function(value) { if (dpiSetting) root.writeSetting(dpiSetting, Number(value)) }
+            }
+
+            SliderBlock {
+              visible: !!pointerSetting
+              width: parent.width
+              title: pointerSetting ? pointerSetting.label : "Pointer speed"
+              subtitle: pointerSetting ? String(Math.round(Model.numericValue(pointerSetting, 0))) : ""
+              info: Model.helpForSetting(pointerSetting, "A software pointer-speed multiplier on top of hardware DPI.")
+              setting: pointerSetting
+            }
+
+            SliderBlock {
+              visible: !!(reportSetting && (reportSetting.kind === "range" || (reportSetting.choices && reportSetting.choices.length)))
+              width: parent.width
+              title: "Report rate"
+              subtitle: reportSetting ? (Math.round(Model.numericValue(reportSetting, 0)) + " Hz") : ""
+              info: Model.helpForSetting(reportSetting, "How often the mouse reports movement. 8K is 8000 Hz when the device supports it.")
+              setting: reportSetting
+              formatValue: function(v) { return Math.round(v) + " Hz" }
+            }
+
+            HintedToggle {
+              visible: !!(reportSetting && reportSetting.kind === "toggle")
+              width: parent.width
+              label: "8K polling"
+              info: Model.helpForSetting(reportSetting, "Raises the report rate to the device maximum when the hardware supports it.")
+              checked: reportSetting ? Model.boolValue(reportSetting) : false
+              onClicked: root.writeToggle(reportSetting)
             }
           }
 
@@ -765,8 +828,16 @@ Panel {
     property string subtitle: ""
     property string info: ""
     property var setting: null
+    property var formatValue: null
+    property string liveSubtitle: ""
     property bool hasCursor: false
+    readonly property var bounds: Model.sliderBounds(setting)
     signal hoveredIn()
+
+    function displayFor(value) {
+      if (sliderBlock.formatValue) return sliderBlock.formatValue(value)
+      return String(Math.round(value))
+    }
 
     spacing: Style.space(4)
 
@@ -788,7 +859,7 @@ Panel {
       Item { width: Math.max(0, parent.width - parent.children[0].width - parent.children[1].width - valueLabel.width - parent.spacing * 2); height: 1 }
       Text {
         id: valueLabel
-        text: sliderBlock.subtitle
+        text: sliderBlock.liveSubtitle !== "" ? sliderBlock.liveSubtitle : sliderBlock.subtitle
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -807,12 +878,18 @@ Panel {
         anchors.left: parent.left
         anchors.right: parent.right
         bar: root.bar
-        minimum: sliderBlock.setting && sliderBlock.setting.min !== undefined && sliderBlock.setting.min !== null ? Number(sliderBlock.setting.min) : 0
-        maximum: sliderBlock.setting && sliderBlock.setting.max !== undefined && sliderBlock.setting.max !== null ? Number(sliderBlock.setting.max) : 100
-        step: Math.max(1, Math.round((maximum - minimum) / 40))
+        minimum: sliderBlock.bounds.min
+        maximum: sliderBlock.bounds.max
+        step: sliderBlock.bounds.step
         integer: true
-        value: sliderBlock.setting ? Model.numericValue(sliderBlock.setting, minimum) : minimum
-        onReleased: function(next) { if (sliderBlock.setting) root.writeSetting(sliderBlock.setting, Math.round(next)) }
+        value: sliderBlock.setting ? Model.numericValue(sliderBlock.setting, sliderBlock.bounds.min) : sliderBlock.bounds.min
+        onMoved: function(next) {
+          sliderBlock.liveSubtitle = sliderBlock.displayFor(Model.snapToChoices(sliderBlock.setting, next))
+        }
+        onReleased: function(next) {
+          sliderBlock.liveSubtitle = ""
+          if (sliderBlock.setting) root.writeSetting(sliderBlock.setting, Model.snapToChoices(sliderBlock.setting, next))
+        }
       }
 
       MouseArea {
