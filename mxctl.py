@@ -912,6 +912,34 @@ def apply_cmd(mods, opened, cmd: dict) -> None:
     apply_setting(setting, None if key in ("", None) else key, value)
 
 
+def cleanup_command() -> None:
+    paths = runtime_dir()
+    lock = None
+    for _ in range(20):
+        lock = acquire_lock(blocking=False)
+        if lock is not None:
+            break
+        time.sleep(0.05)
+    if lock is None:
+        emit({"ok": True, "cleaned": False, "message": "helper still running"})
+    for name in ("status.json", "cmd.json"):
+        try:
+            (paths / name).unlink()
+        except OSError:
+            pass
+    try:
+        lock_path = paths / "mxctl.lock"
+        lock.close()
+        lock_path.unlink()
+    except OSError:
+        pass
+    try:
+        paths.rmdir()
+    except OSError:
+        pass
+    emit({"ok": True, "cleaned": True})
+
+
 def serve_command() -> None:
     paths = runtime_dir()
     status_path = paths / "status.json"
@@ -991,6 +1019,8 @@ def main() -> None:
     action = argv[0] if argv else "status"
     if action == "discover":
         emit(discover_payload())
+    if action == "cleanup":
+        cleanup_command()
     if action == "serve":
         serve_command()
         raise SystemExit(0)

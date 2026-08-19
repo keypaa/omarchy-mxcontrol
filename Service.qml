@@ -166,10 +166,20 @@ Item {
     actionStatusTimer.restart()
   }
 
+  function teardown() {
+    daemonWanted = false
+    if (discoverProcess.running) discoverProcess.running = false
+    if (cmdProcess.running) cmdProcess.running = false
+    if (helperPath !== "")
+      Quickshell.execDetached(["python3", helperPath, "cleanup"])
+  }
+
   Component.onCompleted: {
     mkdirProcess.running = true
     discover()
   }
+
+  Component.onDestruction: teardown()
 
   FileView {
     id: statusFile

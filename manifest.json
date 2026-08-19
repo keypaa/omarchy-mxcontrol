@@ -2,10 +2,12 @@
   "schemaVersion": 1,
   "id": "io.github.zachwilke.mx",
   "name": "MX Control",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Zach Wilke",
   "license": "GPL-2.0-or-later",
-  "description": "Control Logitech MX mice and keyboards from the Omarchy bar over Bluetooth, USB, Bolt, or Unifying — DPI, SmartShift, scroll, Easy Switch, and more.",
+  "homepage": "https://github.com/zachwilke/omarchy-mxcontrol",
+  "repository": "https://github.com/zachwilke/omarchy-mxcontrol.git",
+  "description": "Logi Options+ for the Omarchy bar. Control Logitech MX mice and keyboards over Bluetooth, USB, Bolt, or Unifying.",
   "kinds": [
     "bar-widget"
   ],
@@ -19,17 +21,17 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "refreshIntervalSec": 45
+      "refreshIntervalSec": 120
     },
     "schema": [
       {
         "key": "refreshIntervalSec",
         "type": "integer",
-        "label": "Refresh interval (seconds)",
+        "label": "Discover interval (seconds)",
         "min": 10,
         "max": 3600,
         "step": 5,
-        "defaultValue": 45
+        "defaultValue": 120
       },
       {
         "key": "selectedDevice",
