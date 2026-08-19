@@ -86,7 +86,7 @@ Item {
     lastError = parsed.ok ? String(parsed.lastError || "") : parsed.message
     statusText = !installed ? "Solaar not installed"
       : (!accessible ? "Waiting for device access"
-      : (!hasDevice ? "No MX device" : (selectedDevice.name || "MX")))
+      : (!hasDevice ? "No MX device" : Model.hidDisplayName(selectedDevice, "MX")))
   }
 
   function discover() {

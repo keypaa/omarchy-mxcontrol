@@ -280,7 +280,8 @@ Panel {
             PanelHero {
               id: hero
               width: parent.width
-              title: device ? device.name : "MX Control"
+              // HID names are untrusted peripheral identity; never render as rich text.
+              title: device ? Model.hidDisplayName(device, "MX Control") : "MX Control"
               meta: root.canWrite ? root.heroPhraseText : root.heroMeta
               detail: device && Model.batteryLabel(device) ? Model.batteryLabel(device) : ""
               foreground: root.foreground
@@ -302,6 +303,7 @@ Panel {
             visible: mx && (mx.actionStatus !== "" || mx.lastError !== "")
             width: parent.width
             text: mx && mx.actionStatus !== "" ? mx.actionStatus : (mx ? mx.lastError : "")
+            textFormat: Text.PlainText
             color: mx && mx.lastError !== "" && mx.actionStatus === "" ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -374,7 +376,9 @@ Panel {
               Text {
                 required property var modelData
                 width: parent ? parent.width : implicitWidth
-                text: (modelData.name || "Receiver") + " · " + Model.connectionLabel(modelData)
+                // HID names are untrusted peripheral identity; never render as rich text.
+                text: Model.hidDisplayName(modelData, "Receiver") + " · " + Model.connectionLabel(modelData)
+                textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -402,7 +406,7 @@ Panel {
                 Button {
                   required property var modelData
                   required property int index
-                  text: (modelData.name || "Device") + (modelData.connection ? (" · " + Model.connectionLabel(modelData)) : "")
+                  text: Model.hidDisplayName(modelData, "Device") + (modelData.connection ? (" · " + Model.connectionLabel(modelData)) : "")
                   bordered: true
                   selected: device && String(device.id) === String(modelData.id)
                   hasCursor: root.cursorActive && root.focusSection === "devices" && root.cursorIndex === index
