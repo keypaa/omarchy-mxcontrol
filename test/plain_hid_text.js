@@ -25,6 +25,9 @@ check("display missing", Model.hidDisplayName(null, "MX"), "MX")
 check("display markup", Model.hidDisplayName({ name: '<img src="https://evil">' }, "MX"), "&lt;img src=\"https://evil\"&gt;")
 check("battery percent", Model.batteryLabel({ battery: { level: 84 } }), "84%")
 check("battery text markup", Model.batteryLabel({ battery: { text: '<img src="https://evil">' } }), "&lt;img src=\"https://evil\"&gt;")
+check("runtime xdg", Model.runtimeDir("/run/user/1000", "999"), "/run/user/1000/omarchy-mx")
+check("runtime fallback", Model.runtimeDir("", "1000"), "/run/user/1000/omarchy-mx")
+check("runtime null xdg", Model.runtimeDir(null, "42"), "/run/user/42/omarchy-mx")
 
 if (fails) {
   console.error(fails + " failed")
