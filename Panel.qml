@@ -78,6 +78,15 @@ Panel {
   readonly property string heroPhraseText: !device ? heroMeta : activePhrases[phraseIndex % activePhrases.length]
   readonly property bool headerHasCursor: cursorActive && focusSection === "header"
 
+  function hidName(item, fallback) {
+    var raw = ""
+    if (item && item.name) raw = String(item.name)
+    else if (fallback !== undefined && fallback !== null) raw = String(fallback)
+    if (raw.indexOf("&") === -1 && raw.indexOf("<") === -1 && raw.indexOf(">") === -1)
+      return raw
+    return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  }
+
   function usedSettingNames() {
     var names = []
     function add(setting) { if (setting && setting.name) names.push(setting.name) }
@@ -96,6 +105,7 @@ Panel {
   }
 
   function close() {
+    dropdownOpen = false
     root.controller.hide()
   }
 
@@ -220,7 +230,11 @@ Panel {
     cursorIndex = index
   }
 
-  onOpenedChanged: if (opened) {
+  onOpenedChanged: {
+    if (!opened) {
+      dropdownOpen = false
+      return
+    }
     cursorActive = false
     if (panelFlick) panelFlick.contentY = 0
     if (mx) {
@@ -243,7 +257,10 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      enabled: !root.dropdownOpen
+      // blocked, not enabled:false — disabling this item also disables the
+      // Flickable and every Dropdown inside it, so the popup never receives
+      // clicks and dropdownOpen can stay stuck until the shell restarts.
+      blocked: root.dropdownOpen
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dx, dy)
@@ -281,7 +298,7 @@ Panel {
               id: hero
               width: parent.width
               // HID names are untrusted peripheral identity; never render as rich text.
-              title: device ? Model.hidDisplayName(device, "MX Control") : "MX Control"
+              title: device ? root.hidName(device, "MX Control") : "MX Control"
               meta: root.canWrite ? root.heroPhraseText : root.heroMeta
               detail: device && Model.batteryLabel(device) ? Model.batteryLabel(device) : ""
               foreground: root.foreground
@@ -377,7 +394,7 @@ Panel {
                 required property var modelData
                 width: parent ? parent.width : implicitWidth
                 // HID names are untrusted peripheral identity; never render as rich text.
-                text: Model.hidDisplayName(modelData, "Receiver") + " · " + Model.connectionLabel(modelData)
+                text: root.hidName(modelData, "Receiver") + " · " + Model.connectionLabel(modelData)
                 textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
@@ -406,7 +423,7 @@ Panel {
                 Button {
                   required property var modelData
                   required property int index
-                  text: Model.hidDisplayName(modelData, "Device") + (modelData.connection ? (" · " + Model.connectionLabel(modelData)) : "")
+                  text: root.hidName(modelData, "Device") + (modelData.connection ? (" · " + Model.connectionLabel(modelData)) : "")
                   bordered: true
                   selected: device && String(device.id) === String(modelData.id)
                   hasCursor: root.cursorActive && root.focusSection === "devices" && root.cursorIndex === index
@@ -717,16 +734,67 @@ Panel {
             }
           }
 
-          Text {
+          Column {
             visible: mx && mx.installed && mx.accessible && !root.canWrite
             width: parent.width
-            text: mx && mx.daemonWanted
-              ? "Reading settings from the device. The pointer may hitch once while HID++ opens."
-              : "Click the bar icon again if settings do not appear."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WordWrap
+            spacing: Style.space(8)
+
+            Text {
+              width: parent.width
+              text: {
+                if (!mx || !mx.daemonWanted)
+                  return "Click the bar icon again if settings do not appear."
+                if (mx.lastError)
+                  return mx.lastError
+                if (mx.hidppTicks > 12)
+                  return "Still reading settings. Right-click the bar icon to retry."
+                if (mx.progressLabel)
+                  return "Reading " + mx.progressLabel + "…"
+                return "Reading settings from the device…"
+              }
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Row {
+              visible: !!(mx && mx.daemonWanted && !mx.lastError)
+              width: parent.width
+              spacing: Style.space(8)
+
+              Item {
+                width: parent.width - pctLabel.implicitWidth - parent.spacing
+                height: Style.space(8)
+
+                Rectangle {
+                  anchors.fill: parent
+                  radius: height / 2
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
+                }
+
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  height: parent.height
+                  radius: height / 2
+                  color: root.foreground
+                  width: Math.max(parent.height, parent.width * ((mx && mx.readPercent ? mx.readPercent : 0) / 100))
+
+                  Behavior on width { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                }
+              }
+
+              Text {
+                id: pctLabel
+                anchors.verticalCenter: parent.verticalCenter
+                text: (mx && mx.readPercent ? mx.readPercent : 0) + "%"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+            }
           }
         }
       }
@@ -942,6 +1010,7 @@ Panel {
       }
       onHovered: function(on) { if (on) root.setCursor("keys", rowIndex) }
       onPopupOpenChanged: root.dropdownOpen = popupOpen
+      Component.onDestruction: if (popupOpen) root.dropdownOpen = false
       }
 
       InfoHint {
@@ -997,6 +1066,7 @@ Panel {
         onChanged: function(value) { root.writeSetting(extra.setting, value) }
         onHovered: function(on) { if (on) root.setCursor("more", extra.rowIndex) }
         onPopupOpenChanged: root.dropdownOpen = popupOpen
+        Component.onDestruction: if (popupOpen) root.dropdownOpen = false
       }
 
       InfoHint {

@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import importlib.util
 import json
 import logging
 import os
 import re
+import select
 import sys
 import time
 from pathlib import Path
@@ -39,6 +41,25 @@ KIND_NAMES = {
 
 # Settings that need a live Solaar process (gestures, sliding DPI, rules).
 SKIP_WRITE_KINDS = {"packed_range", "graphic_eq", "color"}
+
+# Serve blocks on inotify. Topology is only rescanned when hidraw changes,
+# or on this heartbeat if inotify is unavailable.
+IDLE_TIMEOUT_SEC = 30.0
+TOPOLOGY_FALLBACK_SEC = 2.0
+EXIT_PEER_SERVING = 3
+IN_CREATE = 0x00000100
+IN_MODIFY = 0x00000002
+IN_CLOSE_WRITE = 0x00000008
+IN_MOVED_TO = 0x00000080
+IN_DELETE = 0x00000200
+IN_RUNTIME_MASK = IN_CREATE | IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE
+IN_HIDRAW_MASK = IN_CREATE | IN_DELETE | IN_MOVED_TO
+IN_WATCH_MASK = IN_RUNTIME_MASK
+
+# Filled the first time Solaar is actually imported (serve / set), never on
+# the cheap sysfs discover path.
+_KNOWN_RECEIVER_PIDS: set[str] | None = None
+_KNOWN_RECEIVERS: dict | None = None
 
 
 def emit(payload: dict, code: int = 0) -> None:
@@ -97,28 +118,27 @@ def hid_field(text: str, key: str) -> str:
     return ""
 
 
+def solaar_available() -> bool:
+    return importlib.util.find_spec("logitech_receiver") is not None
+
+
 def receiver_pids() -> set[str]:
     pids = set(FALLBACK_RECEIVER_PIDS)
-    try:
-        from logitech_receiver.base_usb import KNOWN_RECEIVERS
-
-        for key in KNOWN_RECEIVERS:
-            pids.add(f"{int(key):04X}")
-    except Exception:
-        pass
+    if _KNOWN_RECEIVER_PIDS:
+        pids |= _KNOWN_RECEIVER_PIDS
     return pids
 
 
 def receiver_kind_for_pid(product: str) -> str:
     pid = (product or "").upper()
-    try:
-        from logitech_receiver.base_usb import KNOWN_RECEIVERS
-
-        info = KNOWN_RECEIVERS.get(int(pid, 16)) or KNOWN_RECEIVERS.get(pid)
+    known = _KNOWN_RECEIVERS
+    if known:
+        try:
+            info = known.get(int(pid, 16)) or known.get(pid)
+        except ValueError:
+            info = known.get(pid)
         if isinstance(info, dict):
             return str(info.get("receiver_kind") or info.get("name") or "receiver").lower()
-    except Exception:
-        pass
     if pid == "C548":
         return "bolt"
     if pid in {"C52B", "C532"}:
@@ -291,7 +311,10 @@ def serialize_setting(setting) -> dict | None:
         return None
 
     try:
-        value = setting.read(cached=False) if getattr(setting, "live_readable", True) else setting.read(True)
+        # Cached read still hits the device once, then reuses the value.
+        # live_readable+cached=False re-pokes HID++ for every setting and is
+        # what made the first snapshot feel slow.
+        value = setting.read(True)
     except Exception as exc:
         value = None
         read_error = str(exc)
@@ -448,14 +471,24 @@ def connection_for(dev, path: str) -> str:
 
 
 def import_solaar():
+    global _KNOWN_RECEIVERS, _KNOWN_RECEIVER_PIDS
     try:
         from logitech_receiver import base
         from logitech_receiver import device as device_mod
         from logitech_receiver import receiver as receiver_mod
         from logitech_receiver import settings_templates
+        from logitech_receiver.base_usb import KNOWN_RECEIVERS
         from solaar import configuration
     except ImportError as exc:
         return None, str(exc)
+    _KNOWN_RECEIVERS = KNOWN_RECEIVERS
+    pids = set()
+    for key in KNOWN_RECEIVERS:
+        try:
+            pids.add(f"{int(key):04X}")
+        except (TypeError, ValueError):
+            pids.add(str(key).upper())
+    _KNOWN_RECEIVER_PIDS = pids
     return {
         "base": base,
         "device": device_mod,
@@ -518,16 +551,43 @@ def iter_devices(opened):
                 break
 
 
+def is_mouse_dev(dev) -> bool:
+    kind = str(getattr(dev, "kind", "") or "").lower()
+    if kind in {"mouse", "trackball", "touchpad"}:
+        return True
+    return kind_from_name(str(getattr(dev, "name", "") or "")) == "mouse"
+
+
+def ordered_devices(opened) -> list:
+    devices = list(iter_devices(opened))
+    devices.sort(key=lambda dev: (0 if is_mouse_dev(dev) else 1, str(getattr(dev, "name", "") or "").lower()))
+    return devices
+
+
+def device_is_online(dev) -> bool:
+    if getattr(dev, "online", None) is True:
+        return True
+    if getattr(dev, "protocol", None) or getattr(dev, "_protocol", None):
+        return True
+    try:
+        return bool(dev.ping())
+    except Exception:
+        return bool(getattr(dev, "online", False))
+
+
 def load_settings(mods, dev) -> list[dict]:
     try:
         mods["configuration"].attach_to(dev)
     except Exception:
         pass
     raw = list(getattr(dev, "settings", None) or [])
-    try:
-        mods["settings_templates"].check_feature_settings(dev, raw)
-    except Exception:
-        pass
+    # Feature discovery is a HID++ round-trip burst. Do it once; later
+    # snapshots reuse the settings already attached to the open handle.
+    if not any(item is not None for item in raw):
+        try:
+            mods["settings_templates"].check_feature_settings(dev, raw)
+        except Exception:
+            pass
     settings = []
     seen = set()
     for setting in raw:
@@ -596,8 +656,77 @@ def write_bytes(path: Path, data: bytes) -> None:
 
 
 def atomic_write(path: Path, payload: dict) -> None:
+    write_status(path, payload, last_text=None)
+
+
+def write_status(path: Path, payload: dict, last_text: list[str] | None = None) -> bool:
     text = json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+    if last_text is not None and last_text[0] == text:
+        return False
     write_bytes(path, text.encode("utf-8"))
+    if last_text is not None:
+        last_text[0] = text
+    return True
+
+
+def open_inotify(path: Path, mask: int = IN_RUNTIME_MASK) -> int | None:
+    """Watch a directory. None if inotify is unavailable."""
+    try:
+        import ctypes
+        import ctypes.util
+
+        if not path.is_dir():
+            return None
+        libc_name = ctypes.util.find_library("c")
+        if not libc_name:
+            return None
+        libc = ctypes.CDLL(libc_name, use_errno=True)
+        libc.inotify_init1.argtypes = [ctypes.c_int]
+        libc.inotify_init1.restype = ctypes.c_int
+        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        libc.inotify_add_watch.restype = ctypes.c_int
+        fd = libc.inotify_init1(os.O_CLOEXEC | os.O_NONBLOCK)
+        if fd < 0:
+            return None
+        watch = libc.inotify_add_watch(fd, os.fsencode(str(path)), mask)
+        if watch < 0:
+            os.close(fd)
+            return None
+        return fd
+    except Exception:
+        return None
+
+
+def drain_inotify(fd: int) -> None:
+    try:
+        os.read(fd, 4096)
+    except BlockingIOError:
+        pass
+    except OSError:
+        pass
+
+
+def wait_for_event(fds: list[int | None], timeout: float) -> bool:
+    """Block until an inotify fd is readable. True if something woke us."""
+    watched = [fd for fd in fds if fd is not None]
+    if not watched:
+        if timeout > 0:
+            time.sleep(timeout)
+        return False
+    ready, _, _ = select.select(watched, [], [], max(0.0, timeout))
+    for fd in ready:
+        drain_inotify(fd)
+    return bool(ready)
+
+
+def close_inotify(*fds: int | None) -> None:
+    for fd in fds:
+        if fd is None:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def acquire_lock(blocking: bool = True):
@@ -623,10 +752,7 @@ def acquire_lock(blocking: bool = True):
 
 
 def describe_device(mods, dev, full: bool = True) -> dict | None:
-    try:
-        online = bool(dev.ping())
-    except Exception:
-        online = bool(getattr(dev, "online", False))
+    online = device_is_online(dev)
     path = getattr(dev, "path", "") or ""
     name = str(getattr(dev, "name", "") or getattr(dev, "codename", "") or "Logitech device")
     if not is_mx_name(name):
@@ -814,26 +940,38 @@ def apply_setting(setting, key, value):
 
 def discover_payload() -> dict:
     hid_devices, adapters = scan_hidraw()
-    mods, import_error = import_solaar()
+    installed = solaar_available()
     visible = hid_devices + adapters
     return {
         "ok": True,
-        "installed": mods is not None,
+        "installed": installed,
         "accessible": any(item.get("accessible") for item in visible) or not visible,
-        "message": "" if mods is not None else "Solaar is not installed. Install it with `omarchy pkg add solaar`, then reconnect the device.",
-        "importError": import_error,
+        "message": "" if installed else "Solaar is not installed. Install it with `omarchy pkg add solaar`, then reconnect the device.",
+        "importError": "" if installed else "logitech_receiver not found",
         "devices": hid_devices,
         "adapters": adapters,
         "serving": False,
     }
 
 
-def collect_status(mods, opened, hid_devices, adapters, permission_error, full: bool = True) -> dict:
-    described = []
-    for dev in iter_devices(opened):
-        payload = describe_device(mods, dev, full=full)
-        if payload:
-            described.append(payload)
+def progress_payload(done: int, total: int, label: str = "", phase: str = "hidpp") -> dict:
+    total_n = max(int(total or 0), 0)
+    done_n = max(0, int(done or 0))
+    if total_n > 0:
+        done_n = min(done_n, total_n)
+        percent = int(round(100.0 * done_n / total_n))
+    else:
+        percent = 100 if phase == "idle" else 0
+    return {
+        "done": done_n,
+        "total": total_n,
+        "percent": percent,
+        "label": plain_hid_text(label),
+        "phase": phase,
+    }
+
+
+def status_from_described(described, hid_devices, adapters, permission_error, last_error: str = "") -> dict:
     devices = merge_discovery(described, hid_devices)
     accessible = any(item.get("accessible") for item in devices + adapters) or bool(described)
     message = ""
@@ -855,7 +993,47 @@ def collect_status(mods, opened, hid_devices, adapters, permission_error, full: 
         "devices": devices,
         "adapters": adapters,
         "serving": True,
+        "lastError": last_error,
+        "progress": progress_payload(len(described), len(described), "", "idle"),
     }
+
+
+def refresh_one_device(mods, opened, hid_devices, adapters, permission_error, needle: str, previous: dict | None, last_error: str = "") -> dict:
+    """Re-read a single device after a set, keeping the rest of the snapshot."""
+    devices = list(iter_devices(opened))
+    dev = find_device(devices, needle)
+    item = describe_device(mods, dev, full=True) if dev else None
+    described = []
+    replaced = False
+    for old in (previous or {}).get("devices") or []:
+        if item and identity_keys(old) & identity_keys(item):
+            described.append(item)
+            replaced = True
+        elif old.get("settings"):
+            described.append(old)
+    if item and not replaced:
+        described.append(item)
+    if not described:
+        return collect_status(mods, opened, hid_devices, adapters, permission_error, full=True)
+    return status_from_described(described, hid_devices, adapters, permission_error, last_error)
+
+
+def collect_status(mods, opened, hid_devices, adapters, permission_error, full: bool = True, on_partial=None) -> dict:
+    pending = ordered_devices(opened)
+    total = len(pending)
+    described = []
+    last_error = ""
+    for dev in pending:
+        payload = describe_device(mods, dev, full=full)
+        if payload:
+            described.append(payload)
+            if on_partial and full:
+                snap = status_from_described(described, hid_devices, adapters, permission_error, last_error)
+                snap["progress"] = progress_payload(len(described), total, payload.get("name") or "", "hidpp")
+                on_partial(snap)
+    snap = status_from_described(described, hid_devices, adapters, permission_error, last_error)
+    snap["progress"] = progress_payload(len(described), total, "", "idle" if described else "hidpp")
+    return snap
 
 
 def status_command() -> None:
@@ -958,14 +1136,15 @@ def apply_cmd(mods, opened, cmd: dict) -> None:
     dev = find_device(devices, str(cmd.get("device") or ""))
     if not dev:
         raise RuntimeError(f"no device matching '{cmd.get('device')}'")
-    if not dev.ping():
+    if not device_is_online(dev):
         raise RuntimeError(f"{getattr(dev, 'name', 'device')} is offline")
     mods["configuration"].attach_to(dev)
     raw = list(getattr(dev, "settings", None) or [])
-    try:
-        mods["settings_templates"].check_feature_settings(dev, raw)
-    except Exception:
-        pass
+    if not any(item is not None for item in raw):
+        try:
+            mods["settings_templates"].check_feature_settings(dev, raw)
+        except Exception:
+            pass
     setting = find_setting(dev, str(cmd.get("setting") or ""))
     if setting is None:
         raise RuntimeError(f"no setting '{cmd.get('setting')}'")
@@ -985,7 +1164,12 @@ def write_cmd_command(argv: list[str]) -> None:
     if not isinstance(cmd, dict):
         fail("command json must be an object")
     path = runtime_dir() / "cmd.json"
-    atomic_write(path, cmd)
+    payload = json.dumps(cmd, ensure_ascii=False, default=str) + "\n"
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    _create_exclusive(path, payload.encode("utf-8"))
     emit({"ok": True, "path": str(path)})
 
 
@@ -1004,7 +1188,7 @@ def cleanup_command() -> None:
         time.sleep(0.05)
     if lock is None:
         emit({"ok": True, "cleaned": False, "message": "helper still running"})
-    for name in ("status.json", "cmd.json"):
+    for name in ("cmd.json",):
         try:
             (paths / name).unlink()
         except OSError:
@@ -1022,78 +1206,136 @@ def cleanup_command() -> None:
     emit({"ok": True, "cleaned": True})
 
 
-def serve_command() -> None:
+def _read_cmd(cmd_path: Path) -> dict | None:
+    if not cmd_path.exists():
+        return None
+    cmd = None
+    for attempt in range(2):
+        try:
+            cmd = json.loads(cmd_path.read_text(encoding="utf-8"))
+            break
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.02)
+    try:
+        cmd_path.unlink()
+    except OSError:
+        pass
+    if not isinstance(cmd, dict):
+        return None
+    return cmd
+
+
+def serve_command() -> int:
     paths = runtime_dir()
     status_path = paths / "status.json"
     cmd_path = paths / "cmd.json"
-    lock = acquire_lock(blocking=True)
+    lock = acquire_lock(blocking=False)
+    if lock is None:
+        return EXIT_PEER_SERVING
+    last_text = [""]
+    runtime_fd = open_inotify(paths, IN_RUNTIME_MASK)
+    hidraw_root = Path("/sys/class/hidraw")
+    hid_fd = open_inotify(hidraw_root, IN_HIDRAW_MASK) if hidraw_root.is_dir() else None
+    idle_timeout = IDLE_TIMEOUT_SEC if hid_fd is not None else TOPOLOGY_FALLBACK_SEC
+
+    def publish(payload: dict) -> None:
+        write_status(status_path, payload, last_text)
+
     hid_devices, adapters = scan_hidraw()
     topology = hidraw_topology()
-    mods, import_error = import_solaar()
+    starting = discover_payload()
+    starting["serving"] = True
+    starting["progress"] = progress_payload(0, max(len(hid_devices), 1), "Starting", "open")
+    publish(starting)
+    mods, _import_error = import_solaar()
     if mods is None:
-        atomic_write(status_path, discover_payload())
+        publish(discover_payload())
         try:
             while True:
-                time.sleep(2)
-                atomic_write(status_path, discover_payload())
+                _read_cmd(cmd_path)
+                next_topology = hidraw_topology()
+                if next_topology != topology:
+                    topology = next_topology
+                    publish(discover_payload())
+                wait_for_event([runtime_fd, hid_fd], idle_timeout)
         except KeyboardInterrupt:
-            return
+            return 0
         finally:
+            close_inotify(runtime_fd, hid_fd)
             if lock:
                 lock.close()
+        return 0
 
+    starting["progress"] = progress_payload(0, max(len(hid_devices), 1), "Opening devices", "open")
+    publish(starting)
     opened, permission_error = open_devices(mods)
     last_error = ""
     try:
-        # One full HID++ snapshot, then keep the handles open. Closing hidraw
-        # after each probe makes the kernel hid-logitech driver rebind the
-        # Bluetooth mouse (connect, then drop). New USB/2.4G adapters are
-        # opened additively when hidraw topology changes.
-        payload = collect_status(mods, opened, hid_devices, adapters, permission_error, full=True)
+        # Keep hidraw open for the session. Closing it rebinds the Bluetooth
+        # mouse. Publish after each device so the mouse settings paint before
+        # the keyboard HID++ round-trips finish.
+        payload = collect_status(
+            mods,
+            opened,
+            hid_devices,
+            adapters,
+            permission_error,
+            full=True,
+            on_partial=publish,
+        )
         payload["lastError"] = last_error
-        atomic_write(status_path, payload)
-        ticks = 0
+        publish(payload)
         while True:
-            if cmd_path.exists():
-                try:
-                    cmd = json.loads(cmd_path.read_text(encoding="utf-8"))
-                except Exception:
-                    cmd = {}
-                try:
-                    cmd_path.unlink()
-                except OSError:
-                    pass
-                try:
-                    if str(cmd.get("op") or "") == "reopen":
+            cmd = _read_cmd(cmd_path)
+            if cmd is None:
+                wait_for_event([runtime_fd, hid_fd], idle_timeout)
+                cmd = _read_cmd(cmd_path)
+            next_topology = hidraw_topology()
+            topology_changed = next_topology != topology
+            if cmd is None and not topology_changed:
+                continue
+            try:
+                if cmd is not None:
+                    op = str(cmd.get("op") or "")
+                    if op == "reopen" or topology_changed:
                         opened, permission_error = add_new_devices(mods, opened)
-                    else:
+                    if op == "set":
                         apply_cmd(mods, opened, cmd)
                     last_error = ""
-                    hid_devices, adapters = scan_hidraw()
-                    payload = collect_status(mods, opened, hid_devices, adapters, permission_error, full=True)
-                except Exception as exc:
-                    last_error = str(exc)
-                payload["lastError"] = last_error
-                atomic_write(status_path, payload)
-            ticks += 1
-            if ticks % 6 == 0:
-                next_topology = hidraw_topology()
-                if next_topology != topology:
+                elif topology_changed:
                     opened, permission_error = add_new_devices(mods, opened)
-                    hid_devices, adapters = scan_hidraw()
+                    last_error = ""
+                need_full = cmd is None or str(cmd.get("op") or "") in {"set", "reopen"} or topology_changed
+                hid_devices, adapters = scan_hidraw()
+                if need_full and cmd is not None and str(cmd.get("op") or "") == "set":
+                    payload = refresh_one_device(
+                        mods,
+                        opened,
+                        hid_devices,
+                        adapters,
+                        permission_error,
+                        str(cmd.get("device") or ""),
+                        payload,
+                        last_error,
+                    )
+                elif need_full:
                     payload = collect_status(mods, opened, hid_devices, adapters, permission_error, full=True)
-                    payload["lastError"] = last_error
-                    atomic_write(status_path, payload)
-                    topology = next_topology
-            time.sleep(0.25)
+                else:
+                    payload["adapters"] = adapters
+                topology = next_topology
+            except Exception as exc:
+                last_error = str(exc)
+            payload["lastError"] = last_error
+            publish(payload)
     except KeyboardInterrupt:
         pass
     finally:
-        # Process exit still closes the fds. Prefer staying alive for the
-        # session; this path is plugin reload / shell restart only.
+        close_inotify(runtime_fd, hid_fd)
         close_all(mods)
         if lock:
             lock.close()
+    return 0
 
 
 def main() -> None:
@@ -1108,8 +1350,7 @@ def main() -> None:
     if action == "runtime-dir":
         runtime_dir_command()
     if action == "serve":
-        serve_command()
-        raise SystemExit(0)
+        raise SystemExit(serve_command())
     if action in ("status", "show", "list"):
         status_command()
     if action == "set":

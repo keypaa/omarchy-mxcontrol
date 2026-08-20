@@ -5,6 +5,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -56,7 +57,9 @@ class RuntimeDirTests(unittest.TestCase):
         self.assertNotIn("/var/tmp", service)
         self.assertNotIn("/tmp", model)
         self.assertNotIn("/tmp/omarchy-mx", python)
-        self.assertIn('Model.runtimeDir(Quickshell.env("XDG_RUNTIME_DIR")', service)
+        self.assertIn('Quickshell.env("XDG_RUNTIME_DIR")', service)
+        self.assertIn("/run/user/", service)
+        self.assertNotIn("Model.runtimeDir", service)
         self.assertIn("write-cmd", service)
         self.assertNotIn("printf %s", service)
         self.assertNotIn("bash", service.split("function triggerUdev")[0])
@@ -120,7 +123,25 @@ class RuntimeDirTests(unittest.TestCase):
         self.assertTrue((Path(self.xdg) / "omarchy-mx" / "cmd.json").exists())
         cleaned = self.run_helper("cleanup")
         self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
-        self.assertFalse((Path(self.xdg) / "omarchy-mx").exists())
+        self.assertFalse((Path(self.xdg) / "omarchy-mx" / "cmd.json").exists())
+        self.assertFalse((Path(self.xdg) / "omarchy-mx" / "mxctl.lock").exists())
+
+    def test_cleanup_keeps_status_cache(self):
+        runtime = mxctl.runtime_dir()
+        status = runtime / "status.json"
+        mxctl.atomic_write(status, {"ok": True, "devices": [{"name": "MX Master 3S"}]})
+        cleaned = self.run_helper("cleanup")
+        self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+        self.assertTrue(status.is_file())
+        self.assertEqual(json.loads(status.read_text(encoding="utf-8"))["ok"], True)
+
+    def test_serve_exits_when_lock_held(self):
+        lock = mxctl.acquire_lock(blocking=True)
+        self.addCleanup(lock.close)
+        started = time.perf_counter()
+        proc = self.run_helper("serve")
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertLess(time.perf_counter() - started, 0.6)
 
 
 if __name__ == "__main__":

@@ -95,7 +95,7 @@ Settings live on the bar layout entry in `~/.config/omarchy/shell.json`. The plu
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `refreshIntervalSec` | `120` | How often to rescan hidraw when the helper is idle |
+| `refreshIntervalSec` | `15` | How often to rescan hidraw when the helper is idle. Cheap sysfs only — it does not open HID++. |
 | `selectedDevice` | `""` | Preferred device id; empty prefers the mouse |
 
 ## External dependencies
@@ -156,7 +156,10 @@ The helper talks to `/dev/hidraw*` as your user. Solaar’s udev rules grant tha
 omarchy plugin validate .
 python3 mxctl.py discover
 python3 mxctl.py cleanup
+python3 -m unittest discover -s test -v
 ```
+
+Idle cost: the bar path only scans sysfs (no Solaar import, no hidraw open). After you open the panel the helper blocks on inotify for `cmd.json` and hidraw plug events instead of waking on a timer.
 
 Saved files under `~/.config/omarchy/plugins/io.github.zachwilke.mx/` reload automatically. If a change looks stale:
 

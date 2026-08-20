@@ -23,6 +23,7 @@ Item {
   property var devices: []
   property var adapters: []
   property var pendingWrites: []
+  property var cmdQueue: []
   property string selectedId: ""
 
   property string probedUid: ""
@@ -31,21 +32,40 @@ Item {
     if (uid && /^\d+$/.test(String(uid))) return String(uid)
     return probedUid
   }
-  readonly property string runtimeDir: Model.runtimeDir(Quickshell.env("XDG_RUNTIME_DIR"), runtimeUid)
+  // Path is computed here, not via Model.js. A cached/stale JS module must
+  // not be able to point FileView at the wrong file (or nowhere).
+  readonly property string runtimeDir: {
+    var dir = Quickshell.env("XDG_RUNTIME_DIR")
+    if (dir && dir !== "") return String(dir) + "/omarchy-mx"
+    return "/run/user/" + String(runtimeUid || "") + "/omarchy-mx"
+  }
   readonly property string statusPath: runtimeDir + "/status.json"
   readonly property string cmdPath: runtimeDir + "/cmd.json"
-  readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 120, 10, 3600)
+  readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 15, 10, 3600)
   readonly property string preferredId: String(setting("selectedDevice", selectedId || ""))
   readonly property bool busy: discoverProcess.running || cmdProcess.running
   readonly property string helperPath: resolvedHelper()
   readonly property var bluetoothDevices: Bluetooth.devices ? Bluetooth.devices.values : []
-  readonly property var displayDevices: Model.mergeBluetoothBattery(devices, bluetoothDevices)
-  readonly property var selectedDevice: Model.pickDefaultDevice(displayDevices, preferredId, userPicked)
-  readonly property bool hidppReady: Model.isWritableDevice(selectedDevice)
-  readonly property int batteryPercent: Model.batteryPercent(selectedDevice)
-  readonly property bool batteryLow: Model.batteryLow(selectedDevice)
+  readonly property var displayDevices: mergeDevices(devices, bluetoothDevices)
+  readonly property var selectedDevice: pickDevice(displayDevices, preferredId, userPicked)
+  readonly property bool hidppReady: isWritable(selectedDevice)
+  readonly property int batteryPercent: batteryOf(selectedDevice)
+  readonly property bool batteryLow: batteryPercent >= 0 && batteryPercent <= 20
   readonly property bool online: !!(selectedDevice && selectedDevice.online !== false)
   readonly property bool hasDevice: !!selectedDevice
+  property int hidppTicks: 0
+  property bool peerServing: false
+  property int progressDone: 0
+  property int progressTotal: 0
+  property int progressPercent: 0
+  property string progressLabel: ""
+  property string progressPhase: ""
+
+  readonly property int readPercent: {
+    if (progressTotal > 0 || progressPercent > 0) return Math.max(0, Math.min(100, progressPercent))
+    if (!daemonWanted || hasHidppSnapshot) return 0
+    return Math.min(40, hidppTicks * 8)
+  }
 
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
@@ -66,30 +86,89 @@ Item {
     return url
   }
 
-  function applyStatus(raw) {
-    var parsed = Model.parseStatus(raw)
-    var next = parsed.devices || []
-    var nextHasHidpp = false
-    for (var i = 0; i < next.length; i++) {
-      if (Model.isWritableDevice(next[i])) nextHasHidpp = true
+  function isWritable(device) {
+    try {
+      return Model.isWritableDevice(device)
+    } catch (e) {
+      return !!(device && device.readonly !== true && device.settings && device.settings.length)
     }
-    // A sysfs discover snapshot must not replace a live HID++ read.
-    if (hasHidppSnapshot && !nextHasHidpp) return
-    var merged = Model.applyPendingWrites(next, pendingWrites)
-    next = merged.devices
-    pendingWrites = merged.writes
-    installed = parsed.installed === true
-    accessible = parsed.accessible === true
-    devices = next
-    adapters = parsed.adapters || []
-    hasHidppSnapshot = nextHasHidpp
-    message = String(parsed.message || "")
-    var picked = Model.pickDefaultDevice(next, preferredId, userPicked)
-    if (picked && picked.id) selectedId = String(picked.id)
-    lastError = parsed.ok ? String(parsed.lastError || "") : parsed.message
-    statusText = !installed ? "Solaar not installed"
-      : (!accessible ? "Waiting for device access"
-      : (!hasDevice ? "No MX device" : Model.hidDisplayName(selectedDevice, "MX")))
+  }
+
+  function pickDevice(list, preferred, picked) {
+    try {
+      return Model.pickDefaultDevice(list, preferred, picked)
+    } catch (e) {
+      return list && list.length ? list[0] : null
+    }
+  }
+
+  function mergeDevices(list, blues) {
+    try {
+      return Model.mergeBluetoothBattery(list, blues)
+    } catch (e) {
+      return list
+    }
+  }
+
+  function batteryOf(device) {
+    try {
+      return Model.batteryPercent(device)
+    } catch (e) {
+      if (device && device.battery && typeof device.battery.level === "number")
+        return Math.round(device.battery.level)
+      return -1
+    }
+  }
+
+  function applyProgress(parsed) {
+    var progress = parsed && parsed.progress ? parsed.progress : null
+    if (!progress) return
+    progressDone = progress.done || 0
+    progressTotal = progress.total || 0
+    progressPercent = progress.percent || 0
+    progressLabel = String(progress.label || "")
+    progressPhase = String(progress.phase || "")
+  }
+
+  function applyStatus(raw, source) {
+    try {
+      var parsed = Model.parseStatus(raw)
+      applyProgress(parsed)
+      var next = parsed.devices || []
+      var nextHasHidpp = false
+      for (var i = 0; i < next.length; i++) {
+        if (isWritable(next[i])) nextHasHidpp = true
+      }
+      // Sysfs discover must not replace a live HID++ read. While serve is
+      // starting, discover stdout is also ignored so a late scan cannot
+      // clobber the snapshot FileView is about to load.
+      if (!nextHasHidpp && (hasHidppSnapshot || (source === "discover" && daemonWanted)))
+        return
+      var merged = Model.applyPendingWrites(next, pendingWrites)
+      next = merged.devices
+      pendingWrites = merged.writes
+      installed = parsed.installed === true
+      accessible = parsed.accessible === true
+      devices = next
+      adapters = parsed.adapters || []
+      hasHidppSnapshot = nextHasHidpp
+      if (nextHasHidpp) hidppTicks = 0
+      if (nextHasHidpp && progressPhase === "idle") {
+        progressPercent = 100
+        progressDone = progressTotal
+      }
+      message = String(parsed.message || "")
+      var picked = pickDevice(next, preferredId, userPicked)
+      if (picked && picked.id) selectedId = String(picked.id)
+      lastError = parsed.ok ? String(parsed.lastError || "") : parsed.message
+      var name = (picked && picked.name) ? String(picked.name) : "MX"
+      statusText = !installed ? "Solaar not installed"
+        : (!accessible ? "Waiting for device access"
+        : (!(picked && picked.id) ? "No MX device" : name))
+    } catch (e) {
+      lastError = String(e)
+      console.warn("mx applyStatus failed:", e)
+    }
   }
 
   function discover() {
@@ -101,11 +180,13 @@ Item {
 
   function ensureDaemon() {
     daemonWanted = true
+    peerServing = false
   }
 
-  function refresh() {
+  function refresh(force) {
     if (daemonWanted) {
-      if (daemon.running) writeCmd({ op: "refresh" })
+      if (daemon.running && (force === true || !hasHidppSnapshot))
+        writeCmd({ op: "refresh" })
       statusFile.reload()
       return
     }
@@ -136,7 +217,11 @@ Item {
     }
     nextWrites.push(write)
     pendingWrites = nextWrites
-    devices = Model.patchDeviceSetting(devices, write.device, write.name, write.value, write.key)
+    try {
+      devices = Model.patchDeviceSetting(devices, write.device, write.name, write.value, write.key)
+    } catch (e) {
+      console.warn("mx patchDeviceSetting failed:", e)
+    }
     writeCmd({
       op: "set",
       device: write.device,
@@ -147,7 +232,13 @@ Item {
   }
 
   function writeCmd(cmd) {
-    if (cmdProcess.running) return
+    if (helperPath === "") return
+    if (cmdProcess.running) {
+      var queued = cmdQueue.slice()
+      queued.push(cmd)
+      cmdQueue = queued
+      return
+    }
     cmdProcess.command = ["python3", helperPath, "write-cmd", JSON.stringify(cmd)]
     cmdProcess.running = true
   }
@@ -166,6 +257,8 @@ Item {
 
   function teardown() {
     daemonWanted = false
+    peerServing = false
+    cmdQueue = []
     if (discoverProcess.running) discoverProcess.running = false
     if (cmdProcess.running) cmdProcess.running = false
     if (helperPath !== "")
@@ -174,18 +267,22 @@ Item {
 
   Component.onCompleted: {
     mkdirProcess.running = true
-    discover()
+    Qt.callLater(function() {
+      if (statusFile) statusFile.reload()
+      if (!root.hasHidppSnapshot) root.discover()
+    })
   }
 
   Component.onDestruction: teardown()
+
+  onRuntimeDirChanged: if (statusFile) statusFile.reload()
 
   FileView {
     id: statusFile
     path: root.statusPath
     watchChanges: true
     printErrors: false
-    onLoaded: root.applyStatus(text())
-    onLoadFailed: if (!root.daemonWanted) root.discover()
+    onLoaded: root.applyStatus(text(), "file")
     onFileChanged: reload()
   }
 
@@ -212,6 +309,7 @@ Item {
     id: mkdirProcess
     running: false
     command: ["python3", root.helperPath, "runtime-dir"]
+    onExited: Qt.callLater(function() { if (statusFile) statusFile.reload() })
   }
 
   Timer {
@@ -219,13 +317,35 @@ Item {
     interval: 400
     repeat: true
     running: root.daemonWanted && !root.hasHidppSnapshot
-    onTriggered: statusFile.reload()
+    onTriggered: {
+      statusFile.reload()
+      root.hidppTicks += 1
+    }
   }
 
   Process {
     id: daemon
-    running: root.daemonWanted
+    running: root.daemonWanted && !root.peerServing
     command: ["python3", root.helperPath, "serve"]
+    onExited: function(exitCode) {
+      if (!root.daemonWanted) return
+      if (exitCode === 3) {
+        root.peerServing = true
+        return
+      }
+      root.peerServing = false
+      Qt.callLater(function() {
+        if (root.daemonWanted && !root.peerServing && !daemon.running)
+          daemon.running = true
+      })
+    }
+  }
+
+  Timer {
+    interval: 15000
+    repeat: true
+    running: root.daemonWanted && root.peerServing
+    onTriggered: root.peerServing = false
   }
 
   Process {
@@ -237,7 +357,7 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         root.refreshing = false
-        if (text) root.applyStatus(text)
+        if (text) root.applyStatus(text, "discover")
       }
     }
     onExited: root.refreshing = false
@@ -247,6 +367,13 @@ Item {
     id: cmdProcess
     running: false
     command: []
+    onExited: {
+      if (root.cmdQueue.length === 0) return
+      var queued = root.cmdQueue.slice()
+      var next = queued.shift()
+      root.cmdQueue = queued
+      root.writeCmd(next)
+    }
   }
 
   Timer {
@@ -258,7 +385,7 @@ Item {
 
   Timer {
     id: plugWatch
-    interval: 3000
+    interval: root.refreshIntervalSec * 1000
     repeat: true
     running: !root.daemonWanted
     onTriggered: root.discover()

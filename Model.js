@@ -2,6 +2,31 @@ var HID_AMP_RE = /&/g
 var HID_LT_RE = /</g
 var HID_GT_RE = />/g
 
+function emptyProgress() {
+  return { done: 0, total: 0, percent: 0, label: "", phase: "" }
+}
+
+function parseProgress(raw) {
+  var data = raw && typeof raw === "object" ? raw : {}
+  var total = parseInt(String(data.total !== undefined ? data.total : 0), 10)
+  var done = parseInt(String(data.done !== undefined ? data.done : 0), 10)
+  var percent = parseInt(String(data.percent !== undefined ? data.percent : 0), 10)
+  if (!isFinite(total) || total < 0) total = 0
+  if (!isFinite(done) || done < 0) done = 0
+  if (total > 0 && done > total) done = total
+  if (!isFinite(percent) || percent < 0) percent = 0
+  if (percent > 100) percent = 100
+  if (total > 0 && data.percent === undefined)
+    percent = Math.round(100 * done / total)
+  return {
+    done: done,
+    total: total,
+    percent: percent,
+    label: data.label ? String(data.label) : "",
+    phase: data.phase ? String(data.phase) : ""
+  }
+}
+
 function emptyStatus(message) {
   return {
     ok: false,
@@ -9,7 +34,8 @@ function emptyStatus(message) {
     accessible: false,
     message: message || "",
     devices: [],
-    adapters: []
+    adapters: [],
+    progress: emptyProgress()
   }
 }
 
@@ -30,6 +56,8 @@ function hidDisplayName(item, fallback) {
   return plainHidText(raw)
 }
 
+// Kept for tests and the Python helper. Service.qml computes this itself so
+// FileView cannot break if this module is cached stale.
 function runtimeDir(xdgRuntimeDir, uid) {
   var dir = xdgRuntimeDir === undefined || xdgRuntimeDir === null ? "" : String(xdgRuntimeDir)
   if (dir !== "") return dir + "/omarchy-mx"
@@ -48,7 +76,8 @@ function parseStatus(raw) {
       message: String(data.message || ""),
       lastError: String(data.lastError || ""),
       devices: Array.isArray(data.devices) ? data.devices : [],
-      adapters: Array.isArray(data.adapters) ? data.adapters : []
+      adapters: Array.isArray(data.adapters) ? data.adapters : [],
+      progress: parseProgress(data.progress)
     }
   } catch (e) {
     return emptyStatus("Failed to parse device status")
@@ -549,6 +578,7 @@ if (typeof module !== "undefined") {
     remainingSettings: remainingSettings,
     plainHidText: plainHidText,
     hidDisplayName: hidDisplayName,
-    runtimeDir: runtimeDir
+    runtimeDir: runtimeDir,
+    parseProgress: parseProgress
   }
 }

@@ -28,6 +28,9 @@ check("battery text markup", Model.batteryLabel({ battery: { text: '<img src="ht
 check("runtime xdg", Model.runtimeDir("/run/user/1000", "999"), "/run/user/1000/omarchy-mx")
 check("runtime fallback", Model.runtimeDir("", "1000"), "/run/user/1000/omarchy-mx")
 check("runtime null xdg", Model.runtimeDir(null, "42"), "/run/user/42/omarchy-mx")
+check("progress half", Model.parseProgress({ done: 1, total: 2 }).percent, 50)
+check("progress empty", Model.parseProgress(null).percent, 0)
+check("status progress", Model.parseStatus('{"ok":true,"progress":{"done":1,"total":4,"percent":25}}').progress.percent, 25)
 
 if (fails) {
   console.error(fails + " failed")

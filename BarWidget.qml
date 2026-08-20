@@ -35,7 +35,25 @@ BarWidget {
   }
 
   function refresh() {
-    mx.refresh()
+    mx.refresh(true)
+  }
+
+  // One IpcHandler per plugin id. A bar surface exists per monitor; the
+  // leftmost screen owns the target and broadcast() fans out to peers.
+  readonly property bool ipcOwner: {
+    var win = button.QsWindow ? button.QsWindow.window : null
+    var mine = win && win.screen ? win.screen : null
+    var screens = Quickshell.screens
+    var count = screens && screens.length ? screens.length : 0
+    if (!mine || count === 0) return count <= 1
+    var best = screens[0]
+    for (var i = 1; i < count; i++) {
+      var screen = screens[i]
+      if (!screen) continue
+      if (screen.x < best.x || (screen.x === best.x && screen.y < best.y))
+        best = screen
+    }
+    return mine.name === best.name
   }
 
   function injectPanel() {
@@ -71,6 +89,7 @@ BarWidget {
   }
 
   IpcHandler {
+    enabled: root.ipcOwner
     target: "io.github.zachwilke.mx"
 
     function refresh(): void { root.broadcast("refresh") }
@@ -87,7 +106,7 @@ BarWidget {
     bar: root.bar
     tooltipText: {
       if (!mx.hasDevice) return mx.installed ? "No MX device" : "MX Control — install Solaar"
-      var name = Model.hidDisplayName(mx.selectedDevice, "MX")
+      var name = mx.selectedDevice && mx.selectedDevice.name ? String(mx.selectedDevice.name) : "MX"
       var link = Model.connectionLabel(mx.selectedDevice)
       var battery = mx.batteryPercent >= 0 ? (" · " + mx.batteryPercent + "%") : ""
       return name + (link ? (" · " + link) : "") + battery
