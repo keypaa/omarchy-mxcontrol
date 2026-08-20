@@ -1124,11 +1124,136 @@ def set_command(argv: list[str]) -> None:
         close_all(mods)
 
 
+PROFILE_SKIP = {"change-host", "change_host"}
+
+
+def profiles_file() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    folder = Path(base) / "omarchy-mx"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return folder / "profiles.json"
+
+
+def load_profiles() -> dict:
+    path = profiles_file()
+    if not path.is_file():
+        return {"version": 1, "profiles": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": 1, "profiles": []}
+    if not isinstance(data, dict) or not isinstance(data.get("profiles"), list):
+        return {"version": 1, "profiles": []}
+    return {"version": 1, "profiles": data["profiles"]}
+
+
+def write_profiles(data: dict) -> None:
+    write_bytes(profiles_file(), (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+def sanitize_profile_name(raw) -> str:
+    text = " ".join(str(raw or "").split())
+    if not text:
+        raise ValueError("profile name is empty")
+    if len(text) > 40:
+        text = text[:40].rstrip()
+    return text
+
+
+def snapshot_settings(mods, dev) -> list[dict]:
+    rows = []
+    for setting in load_settings(mods, dev):
+        name = str(setting.get("name") or "")
+        if not name or name in PROFILE_SKIP:
+            continue
+        keys = setting.get("keys") or []
+        if keys:
+            for key in keys:
+                rows.append(
+                    {
+                        "name": name,
+                        "key": str(key.get("key") or ""),
+                        "value": jsonable(key.get("value")),
+                    }
+                )
+        else:
+            rows.append({"name": name, "key": "", "value": jsonable(setting.get("value"))})
+    return rows
+
+
+def profile_save(mods, opened, cmd: dict) -> None:
+    name = sanitize_profile_name(cmd.get("name"))
+    devices = list(iter_devices(opened))
+    dev = find_device(devices, str(cmd.get("device") or ""))
+    if not dev:
+        raise RuntimeError(f"no device matching '{cmd.get('device')}'")
+    if not device_is_online(dev):
+        raise RuntimeError(f"{getattr(dev, 'name', 'device')} is offline")
+    entry = {
+        "name": name,
+        "deviceId": device_id(dev),
+        "deviceName": plain_hid_text(str(getattr(dev, "name", "") or "")),
+        "kind": str(getattr(dev, "kind", "") or kind_from_name(str(getattr(dev, "name", "") or ""))),
+        "settings": snapshot_settings(mods, dev),
+    }
+    data = load_profiles()
+    next_profiles = [item for item in data["profiles"] if str(item.get("name") or "") != name]
+    next_profiles.append(entry)
+    data["profiles"] = next_profiles
+    write_profiles(data)
+
+
+def profile_delete(cmd: dict) -> None:
+    name = sanitize_profile_name(cmd.get("name"))
+    data = load_profiles()
+    data["profiles"] = [item for item in data["profiles"] if str(item.get("name") or "") != name]
+    write_profiles(data)
+
+
+def profile_apply(mods, opened, cmd: dict) -> None:
+    name = sanitize_profile_name(cmd.get("name"))
+    found = None
+    for item in load_profiles().get("profiles") or []:
+        if str(item.get("name") or "") == name:
+            found = item
+            break
+    if not found:
+        raise RuntimeError(f"no profile named '{name}'")
+    devices = list(iter_devices(opened))
+    dev = find_device(devices, str(cmd.get("device") or found.get("deviceId") or ""))
+    if not dev:
+        raise RuntimeError(f"no device matching '{cmd.get('device')}'")
+    if not device_is_online(dev):
+        raise RuntimeError(f"{getattr(dev, 'name', 'device')} is offline")
+    mods["configuration"].attach_to(dev)
+    raw = list(getattr(dev, "settings", None) or [])
+    if not any(item is not None for item in raw):
+        try:
+            mods["settings_templates"].check_feature_settings(dev, raw)
+        except Exception:
+            pass
+    for row in found.get("settings") or []:
+        setting = find_setting(dev, str(row.get("name") or ""))
+        if setting is None:
+            continue
+        key = row.get("key")
+        apply_setting(setting, None if key in ("", None) else key, row.get("value"))
+
+
 def apply_cmd(mods, opened, cmd: dict) -> None:
     if not isinstance(cmd, dict):
         return
     op = str(cmd.get("op") or "")
     if op == "refresh":
+        return
+    if op == "profile-save":
+        profile_save(mods, opened, cmd)
+        return
+    if op == "profile-apply":
+        profile_apply(mods, opened, cmd)
+        return
+    if op == "profile-delete":
+        profile_delete(cmd)
         return
     if op != "set":
         return
@@ -1240,6 +1365,8 @@ def serve_command() -> int:
     idle_timeout = IDLE_TIMEOUT_SEC if hid_fd is not None else TOPOLOGY_FALLBACK_SEC
 
     def publish(payload: dict) -> None:
+        payload = dict(payload)
+        payload["profiles"] = load_profiles().get("profiles") or []
         write_status(status_path, payload, last_text)
 
     hid_devices, adapters = scan_hidraw()
@@ -1306,7 +1433,7 @@ def serve_command() -> int:
                 elif topology_changed:
                     opened, permission_error = add_new_devices(mods, opened)
                     last_error = ""
-                need_full = cmd is None or str(cmd.get("op") or "") in {"set", "reopen"} or topology_changed
+                need_full = cmd is None or str(cmd.get("op") or "") in {"set", "reopen", "profile-apply"} or topology_changed
                 hid_devices, adapters = scan_hidraw()
                 if need_full and cmd is not None and str(cmd.get("op") or "") == "set":
                     payload = refresh_one_device(

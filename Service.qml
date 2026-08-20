@@ -24,6 +24,7 @@ Item {
   property var adapters: []
   property var pendingWrites: []
   property var cmdQueue: []
+  property var profiles: []
   property string selectedId: ""
 
   property string probedUid: ""
@@ -134,6 +135,7 @@ Item {
     try {
       var parsed = Model.parseStatus(raw)
       applyProgress(parsed)
+      if (Array.isArray(parsed.profiles)) profiles = parsed.profiles
       var next = parsed.devices || []
       var nextHasHidpp = false
       for (var i = 0; i < next.length; i++) {
@@ -151,6 +153,7 @@ Item {
       accessible = parsed.accessible === true
       devices = next
       adapters = parsed.adapters || []
+      profiles = parsed.profiles || []
       hasHidppSnapshot = nextHasHidpp
       if (nextHasHidpp) hidppTicks = 0
       if (nextHasHidpp && progressPhase === "idle") {
@@ -196,6 +199,30 @@ Item {
   function selectDevice(id) {
     userPicked = true
     selectedId = String(id || "")
+  }
+
+  function saveProfile(name) {
+    if (!selectedDevice || !name) return
+    ensureDaemon()
+    writeCmd({ op: "profile-save", device: String(selectedDevice.id), name: String(name) })
+    actionStatus = "Saving profile…"
+    actionStatusTimer.restart()
+  }
+
+  function applyProfile(name) {
+    if (!selectedDevice || !name) return
+    ensureDaemon()
+    writeCmd({ op: "profile-apply", device: String(selectedDevice.id), name: String(name) })
+    actionStatus = "Applying profile…"
+    actionStatusTimer.restart()
+  }
+
+  function deleteProfile(name) {
+    if (!name) return
+    ensureDaemon()
+    writeCmd({ op: "profile-delete", name: String(name) })
+    actionStatus = "Deleted profile"
+    actionStatusTimer.restart()
   }
 
   function setSetting(name, value, key) {

@@ -16,6 +16,7 @@ HELPER = ROOT / "mxctl.py"
 SERVICE = ROOT / "Service.qml"
 PANEL = ROOT / "Panel.qml"
 BAR = ROOT / "BarWidget.qml"
+SETTINGS = ROOT / "MxSettings.qml"
 MODEL = ROOT / "Model.js"
 
 
@@ -40,7 +41,9 @@ class PerformanceTests(unittest.TestCase):
     def setUp(self):
         self.xdg = tempfile.mkdtemp(prefix="omarchy-mx-perf-")
         self.old_xdg = os.environ.get("XDG_RUNTIME_DIR")
+        self.old_config = os.environ.get("XDG_CONFIG_HOME")
         os.environ["XDG_RUNTIME_DIR"] = self.xdg
+        os.environ["XDG_CONFIG_HOME"] = self.xdg
         self.mxctl = load_mxctl()
 
     def tearDown(self):
@@ -48,11 +51,15 @@ class PerformanceTests(unittest.TestCase):
             os.environ.pop("XDG_RUNTIME_DIR", None)
         else:
             os.environ["XDG_RUNTIME_DIR"] = self.old_xdg
+        if self.old_config is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = self.old_config
         import shutil
         shutil.rmtree(self.xdg, ignore_errors=True)
 
     def test_qml_model_calls_exist(self):
-        qml = "\n".join(path.read_text(encoding="utf-8") for path in (SERVICE, PANEL, BAR))
+        qml = "\n".join(path.read_text(encoding="utf-8") for path in (SERVICE, PANEL, BAR, SETTINGS))
         model = MODEL.read_text(encoding="utf-8")
         names = sorted({
             name for name in re.findall(r"\bModel\.([A-Za-z_][A-Za-z0-9_]*)", qml)
@@ -133,6 +140,14 @@ class PerformanceTests(unittest.TestCase):
         self.assertFalse(self.mxctl.write_status(path, {"ok": True, "n": 1}, last))
         self.assertEqual(path.read_text(encoding="utf-8"), first)
         self.assertTrue(self.mxctl.write_status(path, {"ok": True, "n": 2}, last))
+
+    def test_profile_name_and_store(self):
+        self.assertEqual(self.mxctl.sanitize_profile_name("  Desk  "), "Desk")
+        self.mxctl.write_profiles({"version": 1, "profiles": [{"name": "Desk", "settings": []}]})
+        names = [row["name"] for row in self.mxctl.load_profiles()["profiles"]]
+        self.assertEqual(names, ["Desk"])
+        self.mxctl.profile_delete({"name": "Desk"})
+        self.assertEqual(self.mxctl.load_profiles()["profiles"], [])
 
     def test_progress_payload_percent(self):
         half = self.mxctl.progress_payload(1, 2, "MX Master 3S", "hidpp")

@@ -130,6 +130,16 @@ Panel {
     mx.refresh()
   }
 
+  function openSettings() {
+    var payload = {}
+    if (device && device.id) payload.device = String(device.id)
+    root.close()
+    Qt.callLater(function() {
+      if (root.bar && root.bar.shell && typeof root.bar.shell.summon === "function")
+        root.bar.shell.summon("io.github.zachwilke.mx", JSON.stringify(payload))
+    })
+  }
+
   function writeSetting(setting, value, key) {
     if (!mx || !setting) return
     if (String(setting.name) === "change-host" && Model.choiceId(setting) === String(value)) return
@@ -649,8 +659,18 @@ Panel {
             }
           }
 
+          Button {
+            visible: root.canWrite
+            text: "All settings"
+            bordered: true
+            width: parent.width
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.openSettings()
+          }
+
           Column {
-            visible: root.showKeys && root.canWrite
+            visible: false
             width: parent.width
             spacing: Style.space(8)
 
@@ -684,7 +704,7 @@ Panel {
           }
 
           Column {
-            visible: root.showMore && root.canWrite
+            visible: false
             width: parent.width
             spacing: Style.space(8)
 

@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "id": "io.github.zachwilke.mx",
   "name": "MX Control",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Zach Wilke",
   "license": "GPL-2.0-or-later",
   "homepage": "https://github.com/zachwilke/omarchy-mxcontrol",
   "repository": "https://github.com/zachwilke/omarchy-mxcontrol.git",
-  "description": "Logi Options+ for the Omarchy bar. Control Logitech MX mice and keyboards over Bluetooth, USB, Bolt, or Unifying.",
+  "description": "Logi Options+ for Omarchy. Quick controls in the bar; remaps, gestures, and profiles in a settings window.",
   "dependencies": {
     "required": [
       {
@@ -45,10 +45,12 @@
     ]
   },
   "kinds": [
-    "bar-widget"
+    "bar-widget",
+    "panel"
   ],
   "entryPoints": {
-    "barWidget": "BarWidget.qml"
+    "barWidget": "BarWidget.qml",
+    "panel": "MxSettings.qml"
   },
   "barWidget": {
     "displayName": "MX Control",

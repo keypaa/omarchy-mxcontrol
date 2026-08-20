@@ -1,6 +1,6 @@
 # MX Control
 
-**Logi Options+ for the [Omarchy](https://omarchy.org/) bar.**
+**Logi Options+ for the [Omarchy](https://omarchy.org/) bar — plus a full settings window.**
 
 A first-class Quattro plugin for Logitech MX mice and keyboards — MX Master, Anywhere, Vertical, Ergo, Lift, MX Keys, and the rest of the family — over Bluetooth, USB-C, Bolt, Unifying, Nano, and Lightspeed.
 
@@ -58,6 +58,7 @@ Left in place on purpose:
 | `solaar` package | Shared system package; other tools may use it |
 | `~/.config/solaar/` | Your saved device profiles |
 | Device onboard settings | DPI, SmartShift, remaps live on the hardware |
+| `~/.config/omarchy-mx/` | Local profiles you saved in the settings window |
 
 Nothing in `~/.config/hypr/` or the rest of `~/.config/omarchy/` is rewritten except the bar layout entry that `omarchy plugin remove` already owns.
 
@@ -65,29 +66,36 @@ Nothing in `~/.config/hypr/` or the rest of `~/.config/omarchy/` is rewritten ex
 
 | Input | Action |
 | --- | --- |
-| Left click | Open or close the panel |
+| Left click | Open or close the bar popover |
 | Right click | Refresh discovery |
 | Hover **i** | Explain that setting |
-| Escape | Close the panel |
-| `j` / `k` | Move the panel cursor |
+| Escape | Close the popover or settings window |
+| `j` / `k` | Move the popover cursor |
 | Enter | Activate the focused control |
 | `r` | Refresh |
+| **All settings** | Open the full settings window |
 
 ```sh
 omarchy-shell shell summon io.github.zachwilke.mx '{}'
 omarchy-shell shell hide io.github.zachwilke.mx
 ```
 
-### What you can change
+`summon` opens the **settings window** (remaps, divert/gestures, keyboard extras, profiles). The bar icon still opens the lean popover.
+
+### Bar popover
 
 - Battery and connection (Bluetooth, USB, Bolt, Unifying, Lightspeed)
 - Sensitivity in 50 DPI steps, including **8K** (8000 DPI)
-- SmartShift (ratchet vs free-spin) and its threshold
-- Scroll invert and high-resolution scroll
+- SmartShift, invert scroll, high-resolution scroll
 - Thumb-wheel invert
 - Easy Switch hosts
-- Button remaps the device exposes
-- Keyboard extras such as Fn swap and backlight
+
+### Settings window
+
+- Button remaps
+- Divert / gesture keys (HID++ divert so Solaar rules can run)
+- Keyboard Fn swap, backlight, platform, disable Caps/Win/Insert
+- Local profiles on this computer (`~/.config/omarchy-mx/profiles.json`) — not Logi cloud, Easy Switch channel is not stored
 
 ## Configure
 
