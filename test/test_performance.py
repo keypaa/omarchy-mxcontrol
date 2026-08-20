@@ -156,6 +156,145 @@ class PerformanceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.mxctl.write_profiles({"version": 1, "profiles": [huge]})
 
+    def test_read_cmds_drains_spool_in_order(self):
+        runtime = self.mxctl.runtime_dir()
+        for index, value in enumerate((400, 800, 1600)):
+            name = f"cmd-{index:020d}-1.json"
+            (runtime / name).write_text(
+                json.dumps({"op": "set", "setting": "dpi", "value": value}) + "\n", encoding="utf-8"
+            )
+        cmds = self.mxctl._read_cmds(runtime)
+        self.assertEqual([cmd["value"] for cmd in cmds], [400, 800, 1600])
+        self.assertEqual(list(runtime.glob("cmd-*.json")), [])
+
+    def test_plan_cycle_coalesces_bursts(self):
+        plan = self.mxctl.plan_cycle([{"op": "refresh"}], False)
+        self.assertTrue(plan["full"])
+        self.assertTrue(plan["reopen"])
+        self.assertTrue(plan["live"])
+        plan = self.mxctl.plan_cycle(
+            [{"op": "set", "device": "mouse"}, {"op": "set", "device": "mouse"}], False
+        )
+        self.assertFalse(plan["full"])
+        self.assertFalse(plan["live"])
+        self.assertEqual(plan["set_devices"], ["mouse", "mouse"])
+        plan = self.mxctl.plan_cycle([{"op": "profile-save"}], False)
+        self.assertFalse(plan["full"])
+        self.assertEqual(plan["set_devices"], [])
+        plan = self.mxctl.plan_cycle([{"op": "profile-apply"}], False)
+        self.assertTrue(plan["full"])
+        plan = self.mxctl.plan_cycle([], True)
+        self.assertTrue(plan["full"])
+        self.assertTrue(plan["reopen"])
+        self.assertFalse(plan["live"])
+
+    def test_refresh_batteries_updates_only_changed_levels(self):
+        class Dev:
+            def __init__(self, serial, level):
+                self.serial = serial
+                self.unitId = serial
+                self.path = ""
+                self.name = "MX Master 3S"
+                self.online = True
+                self._level = level
+
+            def battery(self):
+                import types
+
+                return types.SimpleNamespace(level=self._level, status="discharging", voltage=None)
+
+            @property
+            def isDevice(self):
+                return True
+
+        payload = {
+            "devices": [
+                {"id": "mouse", "settings": [{"name": "dpi"}], "battery": {"level": 80}, "readonly": False},
+                {"id": "hidraw9", "settings": [], "battery": None, "readonly": True},
+            ]
+        }
+        self.assertTrue(self.mxctl.refresh_batteries([Dev("mouse", 55)], payload))
+        self.assertEqual(payload["devices"][0]["battery"]["level"], 55)
+        self.assertIsNone(payload["devices"][1]["battery"])
+        self.assertFalse(self.mxctl.refresh_batteries([Dev("mouse", 55)], payload))
+
+    def test_describe_device_streams_settings_before_hosts(self):
+        import types
+
+        def make_setting(name):
+            setting = types.SimpleNamespace(
+                name=name, label=name, description="", kind=0x01, persist=True
+            )
+            setting.read = lambda cached=True: True
+            return setting
+
+        dev = types.SimpleNamespace(
+            online=True,
+            path="",
+            name="MX Master 3S",
+            codename="MX Master 3S",
+            kind="mouse",
+            product_id="B034",
+            wpid="",
+            serial="abc",
+            unitId="abc",
+            protocol=4.5,
+            receiver=None,
+            settings=[make_setting("dpi"), make_setting("smartshift")],
+        )
+        dev.battery = lambda: None
+        mods = {"configuration": types.SimpleNamespace(attach_to=lambda d: None)}
+        seen = []
+
+        def on_settings(payload, done, total):
+            seen.append((done, total, len(payload["settings"])))
+
+        payload = self.mxctl.describe_device(mods, dev, full=True, read_hosts=False, on_settings=on_settings)
+        self.assertEqual(seen, [(1, 2, 1), (2, 2, 2)])
+        self.assertEqual(len(payload["settings"]), 2)
+        self.assertEqual(payload["hosts"], [])
+
+    def test_progress_payload_percent_override(self):
+        payload = self.mxctl.progress_payload(1, 2, "MX Master 3S", "hidpp", percent=17)
+        self.assertEqual(payload["percent"], 17)
+        self.assertEqual(self.mxctl.progress_payload(0, 0, "", "hidpp", percent=250)["percent"], 100)
+
+    def test_shared_service_singleton_contract(self):
+        manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
+        self.assertIn("service", manifest["kinds"])
+        self.assertEqual(manifest["entryPoints"]["service"], "Service.qml")
+        bar = BAR.read_text(encoding="utf-8")
+        self.assertIn("ensureService", bar)
+        self.assertIn("serviceFor", bar)
+        self.assertIn("sharedMx || localMx", bar)
+        self.assertIn("passive: true", bar)
+        settings = SETTINGS.read_text(encoding="utf-8")
+        self.assertIn("property var service", settings)
+        self.assertIn("root.service || localMx", settings)
+        service = SERVICE.read_text(encoding="utf-8")
+        self.assertIn("property var shell", service)
+        self.assertIn("onPassiveChanged", service)
+        # Fallback instances must not spawn processes until promoted.
+        self.assertIn("if (!passive) mkdirProcess.running = true", service)
+
+    def test_qml_status_freshness_and_passive_service(self):
+        service = SERVICE.read_text(encoding="utf-8")
+        self.assertIn("statusIsFresh", service)
+        self.assertIn("lastStatusMs", service)
+        self.assertIn("property bool passive", service)
+        self.assertIn("if (force === true)", service)
+        self.assertNotIn("daemon.running && (force === true", service)
+        settings = SETTINGS.read_text(encoding="utf-8")
+        self.assertIn("passive: true", settings)
+        panel = PANEL.read_text(encoding="utf-8")
+        self.assertNotIn('sections.push("keys")', panel)
+        self.assertNotIn('sections.push("more")', panel)
+        helper = HELPER.read_text(encoding="utf-8")
+        self.assertIn("HEARTBEAT_SEC", helper)
+        self.assertIn("plan_cycle", helper)
+        self.assertIn("prune_dead", helper)
+        self.assertIn("cmd_spool_name", helper)
+
     def test_progress_payload_percent(self):
         half = self.mxctl.progress_payload(1, 2, "MX Master 3S", "hidpp")
         self.assertEqual(half["percent"], 50)

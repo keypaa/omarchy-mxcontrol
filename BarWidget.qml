@@ -69,12 +69,43 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  onBarChanged: injectPanel()
-  onSettingsChanged: injectPanel()
+  onBarChanged: {
+    resolveService()
+    injectPanel()
+  }
+  onSettingsChanged: {
+    if (sharedMx && "settings" in sharedMx) sharedMx.settings = root.settings
+    injectPanel()
+  }
+
+  // One shared Service per shell (manifest entryPoints.service): every bar
+  // widget on every monitor and the settings window drive the same helper,
+  // selection, and snapshot. The local instance below stays a passive
+  // fallback for shells without plugin services.
+  property var sharedMx: null
+  readonly property var mx: sharedMx || localMx
+
+  function resolveService() {
+    if (sharedMx) return
+    var host = root.bar ? root.bar.shell : null
+    if (!host) return
+    var found = null
+    if (typeof host.ensureService === "function") found = host.ensureService(root.moduleName) || null
+    if (!found && typeof host.serviceFor === "function") found = host.serviceFor(root.moduleName)
+    if (found) {
+      sharedMx = found
+      if ("settings" in found) found.settings = root.settings
+      injectPanel()
+      return
+    }
+    // Old shell without plugin services: this widget owns discovery itself.
+    localMx.passive = false
+  }
 
   Service {
-    id: mx
+    id: localMx
     settings: root.settings
+    passive: true
   }
 
   Loader {
@@ -124,5 +155,15 @@ BarWidget {
       if (buttonCode === Qt.RightButton) root.refresh()
       else root.toggle()
     }
+  }
+
+  MouseArea {
+    // Pre-warm on hover: by the time the click lands, the helper's Solaar
+    // import and device open are already underway, so the panel paints
+    // settings almost immediately. Qt.NoButton passes clicks through.
+    anchors.fill: button
+    acceptedButtons: Qt.NoButton
+    hoverEnabled: true
+    onEntered: if (mx.installed && !mx.daemonWanted) mx.ensureDaemon()
   }
 }

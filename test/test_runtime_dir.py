@@ -96,28 +96,43 @@ class RuntimeDirTests(unittest.TestCase):
         else:
             self.assertIn(expected, proc.stderr)
 
+    def spool_files(self):
+        return sorted((Path(self.xdg) / "omarchy-mx").glob("cmd-*.json"))
+
     def test_write_cmd_roundtrip(self):
         cmd = {"op": "set", "device": "abc", "setting": "dpi", "value": 800}
         proc = self.run_helper("write-cmd", json.dumps(cmd))
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        written = json.loads((Path(self.xdg) / "omarchy-mx" / "cmd.json").read_text(encoding="utf-8"))
+        files = self.spool_files()
+        self.assertEqual(len(files), 1)
+        written = json.loads(files[0].read_text(encoding="utf-8"))
         self.assertEqual(written["op"], "set")
         self.assertEqual(written["device"], "abc")
         self.assertEqual(written["value"], 800)
+
+    def test_write_cmd_burst_keeps_every_command(self):
+        for value in (400, 800, 1600):
+            proc = self.run_helper("write-cmd", json.dumps({"op": "set", "setting": "dpi", "value": value}))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        files = self.spool_files()
+        self.assertEqual(len(files), 3)
+        values = [json.loads(path.read_text(encoding="utf-8"))["value"] for path in files]
+        self.assertEqual(values, [400, 800, 1600])
 
     def test_write_cmd_symlink_does_not_truncate(self):
         victim = Path(self.xdg) / "victim.txt"
         victim.write_text("keep-me\n", encoding="utf-8")
         runtime = Path(self.xdg) / "omarchy-mx"
         runtime.mkdir()
-        cmd_path = runtime / "cmd.json"
-        cmd_path.symlink_to(victim)
+        legacy = runtime / "cmd.json"
+        legacy.symlink_to(victim)
         proc = self.run_helper("write-cmd", json.dumps({"op": "refresh"}))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(victim.read_text(encoding="utf-8"), "keep-me\n")
-        self.assertTrue(cmd_path.is_file())
-        self.assertFalse(cmd_path.is_symlink())
-        self.assertEqual(json.loads(cmd_path.read_text(encoding="utf-8"))["op"], "refresh")
+        files = self.spool_files()
+        self.assertEqual(len(files), 1)
+        self.assertFalse(files[0].is_symlink())
+        self.assertEqual(json.loads(files[0].read_text(encoding="utf-8"))["op"], "refresh")
 
     def test_atomic_write_status_symlink_does_not_truncate(self):
         victim = Path(self.xdg) / "status-victim.txt"
@@ -134,11 +149,29 @@ class RuntimeDirTests(unittest.TestCase):
     def test_cleanup_same_directory(self):
         proc = self.run_helper("write-cmd", json.dumps({"op": "refresh"}))
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertTrue((Path(self.xdg) / "omarchy-mx" / "cmd.json").exists())
+        self.assertEqual(len(self.spool_files()), 1)
         cleaned = self.run_helper("cleanup")
         self.assertEqual(cleaned.returncode, 0, cleaned.stderr)
+        self.assertEqual(self.spool_files(), [])
         self.assertFalse((Path(self.xdg) / "omarchy-mx" / "cmd.json").exists())
         self.assertFalse((Path(self.xdg) / "omarchy-mx" / "mxctl.lock").exists())
+
+    def test_runtime_dir_purges_stale_commands(self):
+        runtime = mxctl.runtime_dir()
+        stale = runtime / "cmd-00000000000000000001-1.json"
+        stale.write_text('{"op": "set", "setting": "dpi", "value": 200}\n', encoding="utf-8")
+        proc = self.run_helper("runtime-dir")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(stale.exists())
+
+    def test_runtime_dir_keeps_commands_while_serving(self):
+        runtime = mxctl.runtime_dir()
+        stale = runtime / "cmd-00000000000000000001-1.json"
+        stale.write_text('{"op": "refresh"}\n', encoding="utf-8")
+        lock = mxctl.acquire_lock(blocking=True)
+        self.addCleanup(lock.close)
+        mxctl.purge_stale_cmds(runtime)
+        self.assertTrue(stale.exists())
 
     def test_cleanup_keeps_status_cache(self):
         runtime = mxctl.runtime_dir()

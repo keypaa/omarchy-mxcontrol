@@ -9,13 +9,25 @@ Item {
   id: root
 
   property var shell: null
+  // Injected by shells with plugin-service support: the same shared Service
+  // instance the bar widgets use, so selection and snapshots stay in sync.
+  property var service: null
   property bool closingFromHost: false
   property bool dropdownOpen: false
   property string profileDraft: ""
   property string selectedDivertId: ""
 
+  function resolveService() {
+    if (service || !shell) return
+    if (typeof shell.ensureService === "function")
+      service = shell.ensureService("io.github.zachwilke.mx") || null
+    if (!service && typeof shell.serviceFor === "function")
+      service = shell.serviceFor("io.github.zachwilke.mx")
+  }
+
   function open(payloadJson) {
     closingFromHost = false
+    resolveService()
     window.visible = true
     if (mx) {
       mx.ensureDaemon()
@@ -58,9 +70,14 @@ Item {
   }
   property var bar: fakeBar
 
+  // Fallback for shells without plugin services. Stays passive: it reads
+  // status.json and starts the helper when the window actually opens.
   Service {
-    id: mx
+    id: localMx
+    passive: true
   }
+
+  readonly property var mx: root.service || localMx
 
   readonly property var device: mx.selectedDevice
   onDeviceChanged: selectedDivertId = ""

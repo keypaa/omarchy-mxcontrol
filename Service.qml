@@ -10,6 +10,17 @@ Item {
 
   property var settings: ({})
 
+  // Injected by the shell when this file is instantiated as the plugin's
+  // shared service (manifest entryPoints.service). One instance then serves
+  // every bar widget and the settings window.
+  property var shell: null
+
+  // A passive Service reads status.json and can start the daemon on demand,
+  // but never runs the idle discover poller. The in-file instances inside
+  // BarWidget/MxSettings stay passive fallbacks; a widget promotes its
+  // fallback (passive = false) only on shells without plugin services.
+  property bool passive: false
+
   property bool installed: false
   property bool accessible: false
   property bool refreshing: false
@@ -56,6 +67,7 @@ Item {
   readonly property bool hasDevice: !!selectedDevice
   property int hidppTicks: 0
   property bool peerServing: false
+  property double lastStatusMs: 0
   property int progressDone: 0
   property int progressTotal: 0
   property int progressPercent: 0
@@ -131,11 +143,21 @@ Item {
     progressPhase = String(progress.phase || "")
   }
 
+  function statusIsFresh(parsed) {
+    // The serve helper stamps ts on every publish and heartbeats every 60s.
+    // A snapshot without a recent ts is a cache from a previous session: it
+    // may paint, but it must not claim to be live HID++ state.
+    if (parsed.serving !== true) return false
+    if (!parsed.ts) return false
+    return (Date.now() / 1000 - parsed.ts) < 180
+  }
+
   function applyStatus(raw, source) {
     try {
       var parsed = Model.parseStatus(raw)
+      if (source === "file") lastStatusMs = Date.now()
       applyProgress(parsed)
-      if (Array.isArray(parsed.profiles)) profiles = parsed.profiles
+      if (parsed.hasProfiles) profiles = parsed.profiles
       var next = parsed.devices || []
       var nextHasHidpp = false
       for (var i = 0; i < next.length; i++) {
@@ -153,8 +175,7 @@ Item {
       accessible = parsed.accessible === true
       devices = next
       adapters = parsed.adapters || []
-      profiles = parsed.profiles || []
-      hasHidppSnapshot = nextHasHidpp
+      hasHidppSnapshot = nextHasHidpp && statusIsFresh(parsed)
       if (nextHasHidpp) hidppTicks = 0
       if (nextHasHidpp && progressPhase === "idle") {
         progressPercent = 100
@@ -184,11 +205,16 @@ Item {
   function ensureDaemon() {
     daemonWanted = true
     peerServing = false
+    // Grace period before the peer-liveness timer may force a takeover.
+    lastStatusMs = Date.now()
   }
 
   function refresh(force) {
     if (daemonWanted) {
-      if (daemon.running && (force === true || !hasHidppSnapshot))
+      // Only an explicit user refresh writes a command: the daemon does a
+      // full live re-read for it. Panel opens just re-load the snapshot —
+      // the serve startup burst already covers the first read.
+      if (force === true)
         writeCmd({ op: "refresh" })
       statusFile.reload()
       return
@@ -293,11 +319,20 @@ Item {
   }
 
   Component.onCompleted: {
-    mkdirProcess.running = true
+    if (!passive) mkdirProcess.running = true
     Qt.callLater(function() {
       if (statusFile) statusFile.reload()
+      if (root.passive) return
       if (!root.hasHidppSnapshot) root.discover()
     })
+  }
+
+  // A fallback instance promoted to active duty (old shell without plugin
+  // services) starts discovery it skipped at creation.
+  onPassiveChanged: {
+    if (passive) return
+    mkdirProcess.running = true
+    if (!hasHidppSnapshot && !daemonWanted) discover()
   }
 
   Component.onDestruction: teardown()
@@ -372,7 +407,13 @@ Item {
     interval: 15000
     repeat: true
     running: root.daemonWanted && root.peerServing
-    onTriggered: root.peerServing = false
+    onTriggered: {
+      // The serving peer heartbeats status.json every 60s. Only try to take
+      // over when those heartbeats stop; blind retries spawned a python
+      // process every 15 seconds forever.
+      if (Date.now() - root.lastStatusMs > 180000)
+        root.peerServing = false
+    }
   }
 
   Process {
@@ -414,7 +455,7 @@ Item {
     id: plugWatch
     interval: root.refreshIntervalSec * 1000
     repeat: true
-    running: !root.daemonWanted
+    running: !root.passive && !root.daemonWanted
     onTriggered: root.discover()
   }
 }

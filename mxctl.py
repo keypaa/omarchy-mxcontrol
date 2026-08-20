@@ -47,6 +47,9 @@ SKIP_WRITE_KINDS = {"packed_range", "graphic_eq", "color"}
 # or on this heartbeat if inotify is unavailable.
 IDLE_TIMEOUT_SEC = 30.0
 TOPOLOGY_FALLBACK_SEC = 2.0
+# While idle, re-read battery and stamp a fresh ts so the UI can tell a live
+# snapshot from a stale cache. Settings are not re-read on this heartbeat.
+HEARTBEAT_SEC = 60.0
 EXIT_PEER_SERVING = 3
 IN_CREATE = 0x00000100
 IN_MODIFY = 0x00000002
@@ -304,7 +307,7 @@ def choice_list(choices) -> list[dict]:
     return result
 
 
-def serialize_setting(setting) -> dict | None:
+def serialize_setting(setting, live: bool = False) -> dict | None:
     kind = KIND_NAMES.get(int(getattr(setting, "kind", 0) or 0), "unknown")
     if kind in SKIP_WRITE_KINDS:
         return None
@@ -313,9 +316,9 @@ def serialize_setting(setting) -> dict | None:
 
     try:
         # Cached read still hits the device once, then reuses the value.
-        # live_readable+cached=False re-pokes HID++ for every setting and is
-        # what made the first snapshot feel slow.
-        value = setting.read(True)
+        # live=True is only for an explicit user refresh: Solaar's cache
+        # cannot see changes made on the hardware or from another host.
+        value = setting.read(True) if not live else setting.read(False)
     except Exception as exc:
         value = None
         read_error = str(exc)
@@ -576,7 +579,7 @@ def device_is_online(dev) -> bool:
         return bool(getattr(dev, "online", False))
 
 
-def load_settings(mods, dev) -> list[dict]:
+def load_settings(mods, dev, live: bool = False, on_setting=None) -> list[dict]:
     try:
         mods["configuration"].attach_to(dev)
     except Exception:
@@ -589,15 +592,23 @@ def load_settings(mods, dev) -> list[dict]:
             mods["settings_templates"].check_feature_settings(dev, raw)
         except Exception:
             pass
-    settings = []
+    pending = []
     seen = set()
     for setting in raw:
         if setting is None or setting.name in seen:
             continue
         seen.add(setting.name)
-        serialized = serialize_setting(setting)
+        pending.append(setting)
+    settings = []
+    total = len(pending)
+    for index, setting in enumerate(pending):
+        serialized = serialize_setting(setting, live=live)
         if serialized:
             settings.append(serialized)
+        # Each read is a HID++ round trip; report after every one so the UI
+        # can paint controls as they arrive instead of after the whole burst.
+        if on_setting:
+            on_setting(settings, index + 1, total)
     return settings
 
 
@@ -759,7 +770,7 @@ def acquire_lock(blocking: bool = True):
     return handle
 
 
-def describe_device(mods, dev, full: bool = True) -> dict | None:
+def describe_device(mods, dev, full: bool = True, read_hosts: bool = True, live: bool = False, on_settings=None) -> dict | None:
     online = device_is_online(dev)
     path = getattr(dev, "path", "") or ""
     name = str(getattr(dev, "name", "") or getattr(dev, "codename", "") or "Logitech device")
@@ -788,11 +799,20 @@ def describe_device(mods, dev, full: bool = True) -> dict | None:
         "connection": connection_for(dev, path),
         "accessible": True,
         "battery": battery_payload(dev) if online else None,
-        "hosts": hosts_payload(dev) if online and full else [],
-        "settings": load_settings(mods, dev) if online and full else [],
+        "hosts": [],
+        "settings": [],
         "readonly": False,
         "adapter": plain_hid_text(adapter),
     }
+    if online and full:
+        def stream(settings, done, total):
+            payload["settings"] = settings
+            on_settings(payload, done, total)
+
+        # Settings first so controls paint before the host-name round trips.
+        payload["settings"] = load_settings(mods, dev, live=live, on_setting=stream if on_settings else None)
+        if read_hosts:
+            payload["hosts"] = hosts_payload(dev)
     return payload
 
 
@@ -962,11 +982,14 @@ def discover_payload() -> dict:
     }
 
 
-def progress_payload(done: int, total: int, label: str = "", phase: str = "hidpp") -> dict:
+def progress_payload(done: int, total: int, label: str = "", phase: str = "hidpp", percent: int | None = None) -> dict:
     total_n = max(int(total or 0), 0)
     done_n = max(0, int(done or 0))
     if total_n > 0:
         done_n = min(done_n, total_n)
+    if percent is not None:
+        percent = max(0, min(100, int(percent)))
+    elif total_n > 0:
         percent = int(round(100.0 * done_n / total_n))
     else:
         percent = 100 if phase == "idle" else 0
@@ -1010,34 +1033,55 @@ def refresh_one_device(mods, opened, hid_devices, adapters, permission_error, ne
     """Re-read a single device after a set, keeping the rest of the snapshot."""
     devices = list(iter_devices(opened))
     dev = find_device(devices, needle)
-    item = describe_device(mods, dev, full=True) if dev else None
+    # Host names change essentially never; reuse the previous read so the
+    # confirming snapshot after a toggle costs no extra HID++ round trips.
+    item = describe_device(mods, dev, full=True, read_hosts=False) if dev else None
     described = []
     replaced = False
     for old in (previous or {}).get("devices") or []:
         if item and identity_keys(old) & identity_keys(item):
+            if not item.get("hosts"):
+                item["hosts"] = old.get("hosts") or []
             described.append(item)
             replaced = True
         elif old.get("settings"):
             described.append(old)
     if item and not replaced:
+        if not item.get("hosts"):
+            item["hosts"] = hosts_payload(dev)
         described.append(item)
     if not described:
         return collect_status(mods, opened, hid_devices, adapters, permission_error, full=True)
     return status_from_described(described, hid_devices, adapters, permission_error, last_error)
 
 
-def collect_status(mods, opened, hid_devices, adapters, permission_error, full: bool = True, on_partial=None) -> dict:
+def collect_status(mods, opened, hid_devices, adapters, permission_error, full: bool = True, on_partial=None, live: bool = False) -> dict:
     pending = ordered_devices(opened)
     total = len(pending)
     described = []
     last_error = ""
-    for dev in pending:
-        payload = describe_device(mods, dev, full=full)
+    for index, dev in enumerate(pending):
+        # Publish after every setting read, with percent scaled across all
+        # devices, so one-device setups see honest streaming progress instead
+        # of 0% until the whole burst finishes.
+        def stream(partial, done, count, _index=index):
+            snap = status_from_described(described + [partial], hid_devices, adapters, permission_error, last_error)
+            frac = (_index + (done / count if count else 1.0)) / max(total, 1)
+            snap["progress"] = progress_payload(
+                done, count, partial.get("name") or "", "hidpp", percent=int(round(100.0 * frac))
+            )
+            on_partial(snap)
+
+        payload = describe_device(
+            mods, dev, full=full, live=live, on_settings=stream if (on_partial and full) else None
+        )
         if payload:
             described.append(payload)
             if on_partial and full:
                 snap = status_from_described(described, hid_devices, adapters, permission_error, last_error)
-                snap["progress"] = progress_payload(len(described), total, payload.get("name") or "", "hidpp")
+                snap["progress"] = progress_payload(
+                    index + 1, total, payload.get("name") or "", "hidpp"
+                )
                 on_partial(snap)
     snap = status_from_described(described, hid_devices, adapters, permission_error, last_error)
     snap["progress"] = progress_payload(len(described), total, "", "idle" if described else "hidpp")
@@ -1061,7 +1105,15 @@ def status_command() -> None:
             }
         )
 
-    lock = acquire_lock(blocking=True)
+    lock = acquire_lock(blocking=False)
+    if lock is None:
+        # A serve helper owns the devices; hand back its snapshot instead of
+        # blocking forever on the lock.
+        try:
+            snapshot = json.loads((runtime_dir() / "status.json").read_text(encoding="utf-8"))
+        except Exception:
+            fail("mxctl serve is running but status.json is unreadable")
+        emit(snapshot)
     opened, permission_error = open_devices(mods)
     try:
         payload = collect_status(mods, opened, hid_devices, adapters, permission_error, full=True)
@@ -1318,6 +1370,11 @@ def apply_cmd(mods, opened, cmd: dict) -> None:
     apply_setting(setting, None if key in ("", None) else key, value)
 
 
+def cmd_spool_name() -> str:
+    # Zero-padded nanoseconds sort lexicographically == chronologically.
+    return f"cmd-{time.time_ns():020d}-{os.getpid()}.json"
+
+
 def write_cmd_command(argv: list[str]) -> None:
     raw = argv[0] if argv else sys.stdin.read()
     if not str(raw).strip():
@@ -1328,18 +1385,34 @@ def write_cmd_command(argv: list[str]) -> None:
         fail(f"invalid command json: {exc}")
     if not isinstance(cmd, dict):
         fail("command json must be an object")
-    path = runtime_dir() / "cmd.json"
+    # One file per command. A single cmd.json was a lossy mailbox: a second
+    # write while serve was busy applying the first silently dropped it.
+    path = runtime_dir() / cmd_spool_name()
     payload = json.dumps(cmd, ensure_ascii=False, default=str) + "\n"
-    try:
-        path.unlink()
-    except OSError:
-        pass
     _create_exclusive(path, payload.encode("utf-8"))
     emit({"ok": True, "path": str(path)})
 
 
+def purge_stale_cmds(paths: Path) -> None:
+    """Drop leftover command files when no helper is serving. A stale `set`
+    from a previous session must never replay against the device."""
+    lock = acquire_lock(blocking=False)
+    if lock is None:
+        return
+    try:
+        for stale in [*paths.glob("cmd-*.json"), paths / "cmd.json"]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    finally:
+        lock.close()
+
+
 def runtime_dir_command() -> None:
-    sys.stdout.write(str(runtime_dir()) + "\n")
+    paths = runtime_dir()
+    purge_stale_cmds(paths)
+    sys.stdout.write(str(paths) + "\n")
     raise SystemExit(0)
 
 
@@ -1358,6 +1431,11 @@ def cleanup_command() -> None:
             (paths / name).unlink()
         except OSError:
             pass
+    for spooled in paths.glob("cmd-*.json"):
+        try:
+            spooled.unlink()
+        except OSError:
+            pass
     try:
         lock_path = paths / "mxctl.lock"
         lock.close()
@@ -1371,30 +1449,84 @@ def cleanup_command() -> None:
     emit({"ok": True, "cleaned": True})
 
 
-def _read_cmd(cmd_path: Path) -> dict | None:
-    if not cmd_path.exists():
-        return None
-    cmd = None
-    for attempt in range(2):
+def _read_cmds(paths: Path) -> list[dict]:
+    """Drain the command spool in write order. Consumes legacy cmd.json too."""
+    files = sorted(paths.glob("cmd-*.json"))
+    legacy = paths / "cmd.json"
+    if legacy.exists():
+        files.append(legacy)
+    cmds = []
+    for path in files:
+        cmd = None
+        for attempt in range(2):
+            try:
+                cmd = json.loads(path.read_text(encoding="utf-8"))
+                break
+            except Exception:
+                if attempt == 0:
+                    time.sleep(0.02)
         try:
-            cmd = json.loads(cmd_path.read_text(encoding="utf-8"))
-            break
-        except Exception:
-            if attempt == 0:
-                time.sleep(0.02)
-    try:
-        cmd_path.unlink()
-    except OSError:
-        pass
-    if not isinstance(cmd, dict):
-        return None
-    return cmd
+            path.unlink()
+        except OSError:
+            pass
+        if isinstance(cmd, dict):
+            cmds.append(cmd)
+    return cmds
+
+
+def prune_dead(opened) -> list:
+    """Drop handles whose hidraw node is gone so they stop leaking fds."""
+    kept = []
+    for handle in opened:
+        path = getattr(handle, "path", None)
+        if path and str(path).startswith("/dev/") and not os.path.exists(path):
+            try:
+                handle.close()
+            except Exception:
+                pass
+            continue
+        kept.append(handle)
+    return kept
+
+
+def plan_cycle(cmds: list[dict], topology_changed: bool) -> dict:
+    """Coalesce a drained command burst into one reopen/read plan."""
+    ops = [str(cmd.get("op") or "") for cmd in cmds]
+    refresh = "refresh" in ops
+    reopen = "reopen" in ops
+    return {
+        "reopen": topology_changed or reopen or refresh,
+        "full": topology_changed or reopen or refresh or "profile-apply" in ops,
+        # An explicit refresh bypasses Solaar's value cache: it exists to pick
+        # up changes made on the hardware or from another host.
+        "live": refresh,
+        "set_devices": [str(cmd.get("device") or "") for cmd, op in zip(cmds, ops) if op == "set"],
+    }
+
+
+def refresh_batteries(opened, payload: dict | None) -> bool:
+    """Idle heartbeat: one battery read per live device, no setting reads."""
+    devices = (payload or {}).get("devices") or []
+    if not devices:
+        return False
+    by_id = {device_id(dev): dev for dev in iter_devices(opened)}
+    changed = False
+    for item in devices:
+        if item.get("readonly"):
+            continue
+        dev = by_id.get(str(item.get("id") or ""))
+        if dev is None or getattr(dev, "online", None) is False:
+            continue
+        battery = battery_payload(dev)
+        if battery is not None and battery != item.get("battery"):
+            item["battery"] = battery
+            changed = True
+    return changed
 
 
 def serve_command() -> int:
     paths = runtime_dir()
     status_path = paths / "status.json"
-    cmd_path = paths / "cmd.json"
     lock = acquire_lock(blocking=False)
     if lock is None:
         return EXIT_PEER_SERVING
@@ -1406,6 +1538,9 @@ def serve_command() -> int:
 
     def publish(payload: dict) -> None:
         payload = dict(payload)
+        # ts lets the UI tell a live snapshot from a stale cache left behind
+        # by a previous session.
+        payload["ts"] = int(time.time())
         payload["profiles"] = load_profiles().get("profiles") or []
         write_status(status_path, payload, last_text)
 
@@ -1418,12 +1553,16 @@ def serve_command() -> int:
     mods, _import_error = import_solaar()
     if mods is None:
         publish(discover_payload())
+        last_heartbeat = time.monotonic()
         try:
             while True:
-                _read_cmd(cmd_path)
+                _read_cmds(paths)
                 next_topology = hidraw_topology()
                 if next_topology != topology:
                     topology = next_topology
+                    publish(discover_payload())
+                elif time.monotonic() - last_heartbeat >= HEARTBEAT_SEC:
+                    last_heartbeat = time.monotonic()
                     publish(discover_payload())
                 wait_for_event([runtime_fd, hid_fd], idle_timeout)
         except KeyboardInterrupt:
@@ -1440,8 +1579,8 @@ def serve_command() -> int:
     last_error = ""
     try:
         # Keep hidraw open for the session. Closing it rebinds the Bluetooth
-        # mouse. Publish after each device so the mouse settings paint before
-        # the keyboard HID++ round-trips finish.
+        # mouse. on_partial publishes after every setting read so controls
+        # paint while the burst is still running.
         payload = collect_status(
             mods,
             opened,
@@ -1453,41 +1592,58 @@ def serve_command() -> int:
         )
         payload["lastError"] = last_error
         publish(payload)
+        last_heartbeat = time.monotonic()
         while True:
-            cmd = _read_cmd(cmd_path)
-            if cmd is None:
+            cmds = _read_cmds(paths)
+            if not cmds:
                 wait_for_event([runtime_fd, hid_fd], idle_timeout)
-                cmd = _read_cmd(cmd_path)
+                cmds = _read_cmds(paths)
             next_topology = hidraw_topology()
             topology_changed = next_topology != topology
-            if cmd is None and not topology_changed:
+            if not cmds and not topology_changed:
+                # Battery drains while the snapshot sits idle; re-read it on a
+                # slow heartbeat so the level cannot go stale for hours.
+                if time.monotonic() - last_heartbeat >= HEARTBEAT_SEC:
+                    last_heartbeat = time.monotonic()
+                    refresh_batteries(opened, payload)
+                    payload["lastError"] = last_error
+                    publish(payload)
                 continue
+            plan = plan_cycle(cmds, topology_changed)
             try:
-                if cmd is not None:
-                    op = str(cmd.get("op") or "")
-                    if op == "reopen" or topology_changed:
-                        opened, permission_error = add_new_devices(mods, opened)
-                    if op == "set":
-                        apply_cmd(mods, opened, cmd)
-                    last_error = ""
-                elif topology_changed:
+                if plan["reopen"]:
+                    opened = prune_dead(opened)
                     opened, permission_error = add_new_devices(mods, opened)
-                    last_error = ""
-                need_full = cmd is None or str(cmd.get("op") or "") in {"set", "reopen", "profile-apply"} or topology_changed
+                for cmd in cmds:
+                    try:
+                        apply_cmd(mods, opened, cmd)
+                        last_error = ""
+                    except Exception as exc:
+                        last_error = str(exc)
                 hid_devices, adapters = scan_hidraw()
-                if need_full and cmd is not None and str(cmd.get("op") or "") == "set":
+                targets = set(plan["set_devices"])
+                if not plan["full"] and len(targets) == 1:
                     payload = refresh_one_device(
                         mods,
                         opened,
                         hid_devices,
                         adapters,
                         permission_error,
-                        str(cmd.get("device") or ""),
+                        plan["set_devices"][0],
                         payload,
                         last_error,
                     )
-                elif need_full:
-                    payload = collect_status(mods, opened, hid_devices, adapters, permission_error, full=True)
+                elif plan["full"] or targets:
+                    payload = collect_status(
+                        mods,
+                        opened,
+                        hid_devices,
+                        adapters,
+                        permission_error,
+                        full=True,
+                        on_partial=publish if plan["live"] else None,
+                        live=plan["live"],
+                    )
                 else:
                     payload["adapters"] = adapters
                 topology = next_topology
@@ -1495,6 +1651,7 @@ def serve_command() -> int:
                 last_error = plain_hid_text(str(exc))
             payload["lastError"] = last_error
             publish(payload)
+            last_heartbeat = time.monotonic()
     except KeyboardInterrupt:
         pass
     finally:

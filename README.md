@@ -49,7 +49,7 @@ omarchy plugin disable io.github.zachwilke.mx
 omarchy plugin remove io.github.zachwilke.mx
 ```
 
-Removal deletes the plugin checkout and takes the widget out of the bar. On unload the helper stops and clears the private runtime directory (`$XDG_RUNTIME_DIR/omarchy-mx/` or `/run/user/$UID/omarchy-mx/`).
+Removal deletes the plugin checkout and takes the widget out of the bar. On unload the helper stops and removes its command files and lock from the private runtime directory (`$XDG_RUNTIME_DIR/omarchy-mx/` or `/run/user/$UID/omarchy-mx/`). A `status.json` snapshot may remain as a warm-start cache; it lives on tmpfs and vanishes on reboot, and the UI treats it as stale until a live helper heartbeats it again.
 
 Left in place on purpose:
 
@@ -67,7 +67,7 @@ Nothing in `~/.config/hypr/` or the rest of `~/.config/omarchy/` is rewritten ex
 | Input | Action |
 | --- | --- |
 | Left click | Open or close the bar popover |
-| Right click | Refresh discovery |
+| Right click | Re-read everything live from the device (bypasses the settings cache) |
 | Hover **i** | Explain that setting |
 | Escape | Close the popover or settings window |
 | `j` / `k` | Move the popover cursor |
@@ -140,7 +140,7 @@ The panel’s **Install Solaar** button runs that same command in a terminal (`o
 | --- | --- | --- |
 | `python3 mxctl.py discover` | Periodic hidraw scan | User |
 | `python3 mxctl.py serve` | After you open the panel (keeps hidraw open) | User |
-| `python3 mxctl.py write-cmd` | Panel setting changes (writes `cmd.json`) | User |
+| `python3 mxctl.py write-cmd` | Panel setting changes (writes one `cmd-*.json` per change) | User |
 | `python3 mxctl.py runtime-dir` | Creates the private runtime directory | User |
 | `python3 mxctl.py cleanup` | Plugin unload / remove | User |
 | `omarchy-launch-tui omarchy pkg add solaar` | **Install Solaar** button | User; you confirm the package install |
@@ -150,7 +150,7 @@ No pip packages, no AUR-only packages, no remote downloads, no install hooks.
 
 ### Runtime files
 
-`$XDG_RUNTIME_DIR/omarchy-mx/` when that variable is set, otherwise `/run/user/$UID/omarchy-mx/` (`status.json`, `cmd.json`, `mxctl.lock`). Created mode `0700` as your user. Never `/tmp`. Deleted by `mxctl.py cleanup` when the plugin unloads.
+`$XDG_RUNTIME_DIR/omarchy-mx/` when that variable is set, otherwise `/run/user/$UID/omarchy-mx/` (`status.json`, a `cmd-*.json` command spool, `mxctl.lock`). Each command is its own spool file so quick bursts of changes are never lost. Created mode `0700` as your user. Never `/tmp`. Command files and the lock are deleted by `mxctl.py cleanup` when the plugin unloads; leftover commands from a dead session are purged at the next start so they can never replay.
 
 ### Privileges
 
@@ -167,7 +167,7 @@ python3 mxctl.py cleanup
 python3 -m unittest discover -s test -v
 ```
 
-Idle cost: the bar path only scans sysfs (no Solaar import, no hidraw open). After you open the panel the helper blocks on inotify for `cmd.json` and hidraw plug events instead of waking on a timer.
+Idle cost: the bar path only scans sysfs (no Solaar import, no hidraw open). The manifest declares a `service` entry point, so the shell instantiates **one shared Service** for the whole plugin — every monitor's bar widget and the settings window drive the same helper, device selection, and snapshot. On shells without plugin services, each widget falls back to a local instance (passive except for one active owner). After you open the panel the helper blocks on inotify for spooled `cmd-*.json` files and hidraw plug events; a 60-second heartbeat re-reads only the battery and stamps the snapshot fresh. Initial reads stream: the helper publishes after every HID++ setting read, so the first controls paint while the rest of the burst is still running.
 
 Saved files under `~/.config/omarchy/plugins/io.github.zachwilke.mx/` reload automatically. If a change looks stale:
 

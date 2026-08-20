@@ -32,10 +32,13 @@ function emptyStatus(message) {
     ok: false,
     installed: false,
     accessible: false,
+    serving: false,
+    ts: 0,
     message: message || "",
     devices: [],
     adapters: [],
     progress: emptyProgress(),
+    hasProfiles: false,
     profiles: []
   }
 }
@@ -74,11 +77,14 @@ function parseStatus(raw) {
       ok: data.ok !== false,
       installed: data.installed === true,
       accessible: data.accessible === true,
+      serving: data.serving === true,
+      ts: isFinite(Number(data.ts)) ? Number(data.ts) : 0,
       message: plainHidText(data.message || ""),
       lastError: plainHidText(data.lastError || ""),
       devices: Array.isArray(data.devices) ? data.devices : [],
       adapters: Array.isArray(data.adapters) ? data.adapters : [],
       progress: parseProgress(data.progress),
+      hasProfiles: Array.isArray(data.profiles),
       profiles: Array.isArray(data.profiles) ? data.profiles : []
     }
   } catch (e) {

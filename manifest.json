@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.zachwilke.mx",
   "name": "MX Control",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "author": "Zach Wilke",
   "license": "GPL-2.0-or-later",
   "homepage": "https://github.com/zachwilke/omarchy-mxcontrol",
@@ -46,11 +46,13 @@
   },
   "kinds": [
     "bar-widget",
-    "panel"
+    "panel",
+    "service"
   ],
   "entryPoints": {
     "barWidget": "BarWidget.qml",
-    "panel": "MxSettings.qml"
+    "panel": "MxSettings.qml",
+    "service": "Service.qml"
   },
   "barWidget": {
     "displayName": "MX Control",

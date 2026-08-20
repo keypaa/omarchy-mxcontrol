@@ -33,11 +33,7 @@ Panel {
   readonly property var thumbInvertSetting: Model.settingByNames(device, ["thumb-scroll-invert"])
   readonly property var thumbModeSetting: Model.settingByNames(device, ["thumb-scroll-mode"])
   readonly property var hostSetting: Model.settingByNames(device, ["change-host", "change_host"])
-  readonly property var remapSetting: Model.settingByNames(device, ["reprogrammable-keys"])
   readonly property var reportSetting: Model.settingByNames(device, ["report_rate", "report-rate", "report_rate_extended"])
-  readonly property var fnSetting: Model.settingByNames(device, ["fn-swap", "fn_swap"])
-  readonly property var backlightSetting: Model.settingByNames(device, ["backlight", "backlight_level", "backlight-level"])
-  readonly property var extraSettings: Model.remainingSettings(device, usedSettingNames())
   readonly property var smartState: Model.smartShiftState(smartSetting)
   readonly property var hostOptions: Model.hostOptions(device)
   readonly property bool showDevices: mx && mx.displayDevices && mx.displayDevices.length > 1
@@ -46,8 +42,6 @@ Panel {
   readonly property bool showScroll: !!(smartSetting || smartThresholdSetting || invertSetting || hiresSetting)
   readonly property bool showThumb: !!(thumbInvertSetting || thumbModeSetting)
   readonly property bool showHosts: !!(hostSetting || (device && device.hosts && device.hosts.length))
-  readonly property bool showKeys: !!(remapSetting && remapSetting.keys && remapSetting.keys.length)
-  readonly property bool showMore: extraSettings.length > 0 || !!(reportSetting || fnSetting || backlightSetting)
   readonly property string heroMeta: {
     if (!mx) return "Checking"
     if (!mx.installed) return "Needs Solaar"
@@ -85,15 +79,6 @@ Panel {
     if (raw.indexOf("&") === -1 && raw.indexOf("<") === -1 && raw.indexOf(">") === -1)
       return raw
     return raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-  }
-
-  function usedSettingNames() {
-    var names = []
-    function add(setting) { if (setting && setting.name) names.push(setting.name) }
-    add(dpiSetting); add(pointerSetting); add(smartSetting); add(smartThresholdSetting); add(invertSetting)
-    add(hiresSetting); add(thumbInvertSetting); add(thumbModeSetting); add(hostSetting)
-    add(remapSetting); add(reportSetting); add(fnSetting); add(backlightSetting)
-    return names
   }
 
   function open() {
@@ -161,8 +146,6 @@ Panel {
       if (showScroll) sections.push("scroll")
       if (showThumb) sections.push("thumb")
       if (showHosts) sections.push("hosts")
-      if (showKeys) sections.push("keys")
-      if (showMore) sections.push("more")
     }
     return sections
   }
@@ -173,14 +156,6 @@ Panel {
     if (section === "scroll") return (smartSetting ? 1 : 0) + (invertSetting ? 1 : 0) + (hiresSetting ? 1 : 0)
     if (section === "thumb") return (thumbInvertSetting ? 1 : 0) + (thumbModeSetting ? 1 : 0)
     if (section === "hosts") return hostOptions.length
-    if (section === "keys") return remapSetting && remapSetting.keys ? remapSetting.keys.length : 0
-    if (section === "more") {
-      var n = extraSettings.length
-      if (reportSetting) n += 1
-      if (fnSetting) n += 1
-      if (backlightSetting) n += 1
-      return n
-    }
     return 1
   }
 
@@ -230,8 +205,6 @@ Panel {
     else if (focusSection === "scroll" && invertSetting) writeToggle(invertSetting)
     else if (focusSection === "thumb" && thumbInvertSetting) writeToggle(thumbInvertSetting)
     else if (focusSection === "hosts" && hostSetting) writeSetting(hostSetting, hostOptions[cursorIndex].value)
-    else if (focusSection === "more" && extraSettings[cursorIndex] && extraSettings[cursorIndex].kind === "toggle")
-      writeToggle(extraSettings[cursorIndex])
   }
 
   function setCursor(section, index) {
@@ -670,91 +643,6 @@ Panel {
           }
 
           Column {
-            visible: false
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSeparator { foreground: root.foreground }
-            Row {
-              width: parent.width
-              spacing: Style.space(8)
-              PanelSectionHeader {
-                text: "BUTTONS"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                width: parent.width - buttonsInfo.implicitWidth - parent.spacing
-              }
-              InfoHint {
-                id: buttonsInfo
-                anchors.verticalCenter: parent.verticalCenter
-                text: "Remap a button to another action. The first entry in each list is the factory default."
-              }
-            }
-
-            Repeater {
-              model: remapSetting && remapSetting.keys ? remapSetting.keys : []
-              KeyRow {
-                required property var modelData
-                required property int index
-                width: column.width
-                row: modelData
-                rowIndex: index
-              }
-            }
-          }
-
-          Column {
-            visible: false
-            width: parent.width
-            spacing: Style.space(8)
-
-            PanelSeparator { foreground: root.foreground }
-            PanelSectionHeader {
-              text: "MORE"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            HintedToggle {
-              visible: !!fnSetting && fnSetting.kind === "toggle"
-              width: parent.width
-              label: fnSetting ? fnSetting.label : "Fn swap"
-              info: Model.helpForSetting(fnSetting, "Function keys send media actions by default. Hold Fn for F1–F12.")
-              checked: fnSetting ? Model.boolValue(fnSetting) : false
-              onClicked: root.writeToggle(fnSetting)
-            }
-
-            SliderBlock {
-              visible: !!backlightSetting && backlightSetting.kind === "range"
-              width: parent.width
-              title: backlightSetting ? backlightSetting.label : "Backlight"
-              subtitle: backlightSetting ? String(Math.round(Model.numericValue(backlightSetting, 0))) : ""
-              info: Model.helpForSetting(backlightSetting, "How bright the keyboard backlight is.")
-              setting: backlightSetting
-            }
-
-            HintedToggle {
-              visible: !!backlightSetting && backlightSetting.kind === "toggle"
-              width: parent.width
-              label: backlightSetting ? backlightSetting.label : "Backlight"
-              info: Model.helpForSetting(backlightSetting, "Keyboard lighting on or off.")
-              checked: backlightSetting ? Model.boolValue(backlightSetting) : false
-              onClicked: root.writeToggle(backlightSetting)
-            }
-
-            Repeater {
-              model: extraSettings
-              ExtraRow {
-                required property var modelData
-                required property int index
-                width: column.width
-                setting: modelData
-                rowIndex: index
-              }
-            }
-          }
-
-          Column {
             visible: mx && mx.installed && mx.accessible && !root.canWrite
             width: parent.width
             spacing: Style.space(8)
@@ -994,107 +882,4 @@ Panel {
     }
   }
 
-  component KeyRow: Column {
-    id: keyRow
-    property var row: ({})
-    property int rowIndex: 0
-    spacing: Style.space(4)
-
-    Row {
-      width: parent.width
-      spacing: Style.space(8)
-      Dropdown {
-        width: parent.width - keyInfo.implicitWidth - parent.spacing
-        label: row && row.label ? row.label : "Button"
-      value: {
-        var current = row && row.value
-        if (current && typeof current === "object" && current.id !== undefined) return String(current.id)
-        return current === undefined || current === null ? "" : String(current)
-      }
-      options: {
-        var choices = row && row.choices ? row.choices : []
-        var list = []
-        for (var i = 0; i < choices.length; i++) {
-          var item = choices[i]
-          list.push({
-            value: item && item.id !== undefined ? String(item.id) : String(item && item.name || item),
-            label: item && item.name ? String(item.name) : String(item)
-          })
-        }
-        return list
-      }
-      hasCursor: root.cursorActive && root.focusSection === "keys" && root.cursorIndex === rowIndex
-      foreground: root.foreground
-      fontFamily: root.fontFamily
-      onChanged: function(value) {
-        if (root.remapSetting) root.writeSetting(root.remapSetting, value, row.key)
-      }
-      onHovered: function(on) { if (on) root.setCursor("keys", rowIndex) }
-      onPopupOpenChanged: root.dropdownOpen = popupOpen
-      Component.onDestruction: if (popupOpen) root.dropdownOpen = false
-      }
-
-      InfoHint {
-        id: keyInfo
-        anchors.verticalCenter: parent.verticalCenter
-        text: Model.helpForSetting(root.remapSetting, "Changes what this button sends. The first action is the factory default.")
-      }
-    }
-  }
-
-  component ExtraRow: Column {
-    id: extra
-    property var setting: null
-    property int rowIndex: 0
-    width: parent ? parent.width : implicitWidth
-    spacing: Style.space(4)
-
-    HintedToggle {
-      visible: extra.setting && extra.setting.kind === "toggle"
-      width: parent.width
-      label: extra.setting ? extra.setting.label : ""
-      info: Model.helpForSetting(extra.setting, "")
-      checked: extra.setting ? Model.boolValue(extra.setting) : false
-      hasCursor: root.cursorActive && root.focusSection === "more" && root.cursorIndex === extra.rowIndex
-      onClicked: root.writeToggle(extra.setting)
-      onHovered: function(on) { if (on) root.setCursor("more", extra.rowIndex) }
-    }
-
-    SliderBlock {
-      visible: extra.setting && extra.setting.kind === "range"
-      width: parent.width
-      title: extra.setting ? extra.setting.label : ""
-      subtitle: extra.setting ? String(Math.round(Model.numericValue(extra.setting, 0))) : ""
-      info: Model.helpForSetting(extra.setting, "")
-      setting: extra.setting
-      hasCursor: root.cursorActive && root.focusSection === "more" && root.cursorIndex === extra.rowIndex
-      onHoveredIn: root.setCursor("more", extra.rowIndex)
-    }
-
-    Row {
-      visible: extra.setting && extra.setting.kind === "choice"
-      width: parent.width
-      spacing: Style.space(8)
-
-      Dropdown {
-        width: parent.width - extraInfo.implicitWidth - parent.spacing
-        label: extra.setting ? extra.setting.label : ""
-        value: extra.setting ? Model.choiceId(extra.setting) : ""
-        options: extra.setting ? Model.choiceOptions(extra.setting) : []
-        hasCursor: root.cursorActive && root.focusSection === "more" && root.cursorIndex === extra.rowIndex
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-        onChanged: function(value) { root.writeSetting(extra.setting, value) }
-        onHovered: function(on) { if (on) root.setCursor("more", extra.rowIndex) }
-        onPopupOpenChanged: root.dropdownOpen = popupOpen
-        Component.onDestruction: if (popupOpen) root.dropdownOpen = false
-      }
-
-      InfoHint {
-        id: extraInfo
-        anchors.verticalCenter: parent.verticalCenter
-        text: Model.helpForSetting(extra.setting, "")
-      }
-    }
-  }
 }
