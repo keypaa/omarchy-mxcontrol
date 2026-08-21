@@ -416,17 +416,105 @@ def battery_payload(dev) -> dict | None:
     }
 
 
-def hosts_payload(dev) -> list[dict]:
+HOSTS_INFO_FEATURE = 0x1815
+HOST_NAME_MAX = 32
+
+
+def _hosts_feature():
+    # Solaar's enum when available so Device.feature_request resolves it the
+    # normal way; the raw feature id otherwise (tests, no Solaar).
     try:
         from logitech_receiver import hidpp20
 
-        names = hidpp20.Hidpp20().get_host_names(dev) or {}
+        return hidpp20.SupportedFeature.HOSTS_INFO
+    except Exception:
+        return HOSTS_INFO_FEATURE
+
+
+def read_host_names(dev) -> tuple[dict, int]:
+    """Pure 0x1815 read. Solaar's get_host_names silently REWRITES the current
+    host's name to the machine hostname on every call; this reader never
+    writes, so user renames stick and snapshots stay side-effect free."""
+    import struct
+
+    feature = _hosts_feature()
+    state = dev.feature_request(feature, 0x00)
+    if not state:
+        return {}, -1
+    flags, _pad, num_hosts, current = struct.unpack("!BBBB", bytes(state[:4]))
+    names = {}
+    if flags & 0x01:
+        for host in range(num_hosts):
+            info = dev.feature_request(feature, 0x10, host)
+            if not info:
+                continue
+            _h, status, _pg, _pgs, name_len, _max = struct.unpack("!BBBBBB", bytes(info[:6]))
+            name = b""
+            remaining = name_len
+            while remaining > 0:
+                piece = dev.feature_request(feature, 0x30, host, name_len - remaining)
+                if not piece:
+                    break
+                name += bytes(piece[2 : 2 + min(remaining, 14)])
+                remaining = max(0, remaining - 14)
+            names[host] = (bool(status), name.decode("utf-8", errors="replace"))
+    return names, int(current)
+
+
+def sanitize_host_name(raw) -> str:
+    text = plain_hid_text(" ".join(str(raw or "").split()))
+    if not text:
+        raise ValueError("host name is empty")
+    return text[:HOST_NAME_MAX]
+
+
+def write_host_name(dev, host: int, name: str) -> None:
+    """Rename one Easy Switch channel. Unlike Solaar's set_host_name, this
+    targets any host index, not just the current one."""
+    import struct
+
+    feature = _hosts_feature()
+    state = dev.feature_request(feature, 0x00)
+    if not state:
+        raise RuntimeError("this device does not expose Easy Switch host info")
+    flags, _pad, num_hosts, _current = struct.unpack("!BBBB", bytes(state[:4]))
+    if not flags & 0x02:
+        raise RuntimeError("this device does not allow renaming hosts")
+    if host < 0 or host >= num_hosts:
+        raise ValueError(f"channel {host + 1} is out of range")
+    info = dev.feature_request(feature, 0x10, host)
+    if not info:
+        raise RuntimeError("could not read host info")
+    max_len = struct.unpack("!BBBBBB", bytes(info[:6]))[5]
+    data = name.encode("utf-8")[: max(1, int(max_len))]
+    # Do not split a multi-byte character at the device's length cap.
+    data = data.decode("utf-8", errors="ignore").encode("utf-8")
+    if not data:
+        raise ValueError("host name is empty")
+    chunk = 0
+    while chunk < len(data):
+        response = dev.feature_request(feature, 0x40, host, chunk, data[chunk : chunk + 14])
+        if not response:
+            raise RuntimeError("device rejected the host name")
+        chunk += 14
+
+
+def hosts_payload(dev) -> list[dict]:
+    try:
+        names, current = read_host_names(dev)
     except Exception:
         return []
     hosts = []
     for index, info in names.items():
         paired, name = info if isinstance(info, tuple) and len(info) >= 2 else (False, str(info))
-        hosts.append({"index": int(index), "name": plain_hid_text(str(name or f"Host {index}")), "paired": bool(paired)})
+        hosts.append(
+            {
+                "index": int(index),
+                "name": plain_hid_text(str(name or f"Host {index}")),
+                "paired": bool(paired),
+                "current": int(index) == current,
+            }
+        )
     return hosts
 
 
@@ -1029,13 +1117,14 @@ def status_from_described(described, hid_devices, adapters, permission_error, la
     }
 
 
-def refresh_one_device(mods, opened, hid_devices, adapters, permission_error, needle: str, previous: dict | None, last_error: str = "") -> dict:
+def refresh_one_device(mods, opened, hid_devices, adapters, permission_error, needle: str, previous: dict | None, last_error: str = "", reuse_hosts: bool = True) -> dict:
     """Re-read a single device after a set, keeping the rest of the snapshot."""
     devices = list(iter_devices(opened))
     dev = find_device(devices, needle)
     # Host names change essentially never; reuse the previous read so the
     # confirming snapshot after a toggle costs no extra HID++ round trips.
-    item = describe_device(mods, dev, full=True, read_hosts=False) if dev else None
+    # reuse_hosts=False forces a fresh read (after a rename).
+    item = describe_device(mods, dev, full=True, read_hosts=not reuse_hosts) if dev else None
     described = []
     replaced = False
     for old in (previous or {}).get("devices") or []:
@@ -1347,6 +1436,15 @@ def apply_cmd(mods, opened, cmd: dict) -> None:
     if op == "profile-delete":
         profile_delete(cmd)
         return
+    if op == "rename-host":
+        devices = list(iter_devices(opened))
+        dev = find_device(devices, str(cmd.get("device") or ""))
+        if not dev:
+            raise RuntimeError(f"no device matching '{cmd.get('device')}'")
+        if not device_is_online(dev):
+            raise RuntimeError(f"{plain_hid_text(getattr(dev, 'name', 'device'))} is offline")
+        write_host_name(dev, int(cmd.get("host") or 0), sanitize_host_name(cmd.get("name")))
+        return
     if op != "set":
         return
     devices = list(iter_devices(opened))
@@ -1500,7 +1598,10 @@ def plan_cycle(cmds: list[dict], topology_changed: bool) -> dict:
         # An explicit refresh bypasses Solaar's value cache: it exists to pick
         # up changes made on the hardware or from another host.
         "live": refresh,
-        "set_devices": [str(cmd.get("device") or "") for cmd, op in zip(cmds, ops) if op == "set"],
+        # A host rename must re-read host names in the confirming snapshot
+        # instead of reusing the cached ones.
+        "rehost": "rename-host" in ops,
+        "set_devices": [str(cmd.get("device") or "") for cmd, op in zip(cmds, ops) if op in ("set", "rename-host")],
     }
 
 
@@ -1632,6 +1733,7 @@ def serve_command() -> int:
                         plan["set_devices"][0],
                         payload,
                         last_error,
+                        reuse_hosts=not plan["rehost"],
                     )
                 elif plan["full"] or targets:
                     payload = collect_status(

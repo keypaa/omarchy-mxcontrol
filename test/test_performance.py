@@ -167,11 +167,88 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual([cmd["value"] for cmd in cmds], [400, 800, 1600])
         self.assertEqual(list(runtime.glob("cmd-*.json")), [])
 
+    def test_sanitize_host_name(self):
+        self.assertEqual(self.mxctl.sanitize_host_name("  Desk   PC "), "Desk PC")
+        self.assertEqual(self.mxctl.sanitize_host_name('<b>Desk</b>'), "bDesk/b")
+        self.assertEqual(len(self.mxctl.sanitize_host_name("x" * 99)), self.mxctl.HOST_NAME_MAX)
+        with self.assertRaises(ValueError):
+            self.mxctl.sanitize_host_name("   ")
+
+    class FakeHostsDev:
+        def __init__(self, names, current=0, flags=0x03, max_len=24):
+            self.names = {i: (True, n) for i, n in enumerate(names)}
+            self.current = current
+            self.flags = flags
+            self.max_len = max_len
+            self.writes = []
+
+        def feature_request(self, feature, function=0x00, *params):
+            import struct
+
+            if function == 0x00:
+                return struct.pack("!BBBB", self.flags, 0, len(self.names), self.current) + b"\x00" * 12
+            if function == 0x10:
+                host = int(params[0])
+                paired, name = self.names[host]
+                raw = name.encode("utf-8")
+                return struct.pack("!BBBBBB", host, 1 if paired else 0, 0, 0, len(raw), self.max_len) + b"\x00" * 10
+            if function == 0x30:
+                host, offset = int(params[0]), int(params[1])
+                raw = self.names[host][1].encode("utf-8")
+                return bytes([host, offset]) + raw[offset : offset + 14]
+            if function == 0x40:
+                host, offset, chunk = int(params[0]), int(params[1]), params[2]
+                self.writes.append((host, offset, bytes(chunk)))
+                return b"\x00\x01"
+            return None
+
+    def test_read_host_names_is_pure(self):
+        # Keep the suite import-free: the fake device accepts the raw id.
+        self.mxctl._hosts_feature = lambda: self.mxctl.HOSTS_INFO_FEATURE
+        dev = self.FakeHostsDev(["Desk", "A name much longer than one chunk"], current=1)
+        names, current = self.mxctl.read_host_names(dev)
+        self.assertEqual(current, 1)
+        self.assertEqual(names[0], (True, "Desk"))
+        self.assertEqual(names[1], (True, "A name much longer than one chunk"))
+        # A pure read must never write (Solaar's get_host_names does).
+        self.assertEqual(dev.writes, [])
+        hosts = self.mxctl.hosts_payload(dev)
+        self.assertEqual(hosts[0]["current"], False)
+        self.assertEqual(hosts[1]["current"], True)
+
+    def test_write_host_name_targets_any_channel(self):
+        self.mxctl._hosts_feature = lambda: self.mxctl.HOSTS_INFO_FEATURE
+        dev = self.FakeHostsDev(["Desk", "Laptop"], current=0, max_len=24)
+        self.mxctl.write_host_name(dev, 1, "Workshop Machine Longer")
+        written = b"".join(chunk for host, _off, chunk in dev.writes if host == 1)
+        self.assertEqual(written.decode("utf-8"), "Workshop Machine Longer")
+        self.assertTrue(all(len(chunk) <= 14 for _h, _o, chunk in dev.writes))
+        dev = self.FakeHostsDev(["Desk"], max_len=8)
+        self.mxctl.write_host_name(dev, 0, "A very long name")
+        self.assertEqual(len(b"".join(c for _h, _o, c in dev.writes)), 8)
+        with self.assertRaises(ValueError):
+            self.mxctl.write_host_name(self.FakeHostsDev(["Desk"]), 5, "Nope")
+        with self.assertRaises(RuntimeError):
+            self.mxctl.write_host_name(self.FakeHostsDev(["Desk"], flags=0x01), 0, "Nope")
+
+    def test_rename_host_qml_contract(self):
+        service = SERVICE.read_text(encoding="utf-8")
+        self.assertIn("rename-host", service)
+        self.assertIn("patchDeviceHostName", service)
+        settings = SETTINGS.read_text(encoding="utf-8")
+        self.assertIn("renameHost", settings)
+        model = MODEL.read_text(encoding="utf-8")
+        self.assertIn("function patchDeviceHostName", model)
+
     def test_plan_cycle_coalesces_bursts(self):
         plan = self.mxctl.plan_cycle([{"op": "refresh"}], False)
         self.assertTrue(plan["full"])
         self.assertTrue(plan["reopen"])
         self.assertTrue(plan["live"])
+        plan = self.mxctl.plan_cycle([{"op": "rename-host", "device": "mouse", "host": 1}], False)
+        self.assertFalse(plan["full"])
+        self.assertTrue(plan["rehost"])
+        self.assertEqual(plan["set_devices"], ["mouse"])
         plan = self.mxctl.plan_cycle(
             [{"op": "set", "device": "mouse"}, {"op": "set", "device": "mouse"}], False
         )

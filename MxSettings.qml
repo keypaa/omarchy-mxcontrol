@@ -441,6 +441,57 @@ Item {
                 fontFamily: root.fontFamily
                 onChanged: function(value) { if (hostSetting) root.writeSetting(hostSetting, value) }
               }
+              Text {
+                visible: !!(device && device.hosts && device.hosts.length)
+                width: parent.width
+                text: "Rename a channel below. Names are stored on the device and show on every computer. Solaar may keep the active channel set to this computer's hostname."
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              Repeater {
+                model: (device && device.hosts && device.hosts.length) ? device.hosts : []
+                Row {
+                  id: hostRow
+                  required property var modelData
+                  width: column.width
+                  spacing: Style.space(8)
+                  Text {
+                    id: hostNum
+                    text: String(Number(hostRow.modelData.index) + 1) + (hostRow.modelData.current ? " •" : "")
+                    textFormat: Text.PlainText
+                    color: hostRow.modelData.current ? root.foreground : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    width: Style.space(28)
+                    anchors.verticalCenter: parent.verticalCenter
+                  }
+                  TextField {
+                    id: hostNameField
+                    width: parent.width - hostNum.width - hostRenameBtn.implicitWidth - parent.spacing * 2
+                    placeholderText: root.hidName(hostRow.modelData, "Channel " + (Number(hostRow.modelData.index) + 1))
+                    font.family: root.fontFamily
+                    onAccepted: {
+                      mx.renameHost(hostRow.modelData.index, text)
+                      text = ""
+                    }
+                  }
+                  Button {
+                    id: hostRenameBtn
+                    text: "Rename"
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                      mx.renameHost(hostRow.modelData.index, hostNameField.text)
+                      hostNameField.text = ""
+                    }
+                  }
+                }
+              }
             }
 
             Column {

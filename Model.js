@@ -367,6 +367,22 @@ function applyPendingWrites(devices, writes) {
   return { devices: next, writes: kept }
 }
 
+function patchDeviceHostName(devices, deviceId, hostIndex, name) {
+  var list = Array.isArray(devices) ? devices : []
+  var next = []
+  for (var i = 0; i < list.length; i++) {
+    var device = cloneValue(list[i])
+    if (deviceMatches(device, deviceId) && device.hosts) {
+      for (var j = 0; j < device.hosts.length; j++) {
+        if (Number(device.hosts[j].index) === Number(hostIndex))
+          device.hosts[j].name = plainHidText(name)
+      }
+    }
+    next.push(device)
+  }
+  return next
+}
+
 function patchDeviceSetting(devices, deviceId, name, value, key) {
   var list = Array.isArray(devices) ? devices : []
   var next = []
@@ -1100,6 +1116,8 @@ if (typeof module !== "undefined") {
     mouseFamily: mouseFamily,
     mouseFamilyLabel: mouseFamilyLabel,
     keyIsDiverted: keyIsDiverted,
+    patchDeviceHostName: patchDeviceHostName,
+    hostOptions: hostOptions,
     plainHidText: plainHidText,
     hidDisplayName: hidDisplayName,
     runtimeDir: runtimeDir,

@@ -251,6 +251,22 @@ Item {
     actionStatusTimer.restart()
   }
 
+  function renameHost(index, name) {
+    if (!selectedDevice || selectedDevice.readonly) return
+    var clean = String(name || "").trim()
+    if (clean === "") return
+    ensureDaemon()
+    writeCmd({ op: "rename-host", device: String(selectedDevice.id), host: Number(index), name: clean })
+    // Optimistic label; the confirming snapshot re-reads names from the device.
+    try {
+      devices = Model.patchDeviceHostName(devices, String(selectedDevice.id), index, clean)
+    } catch (e) {
+      console.warn("mx patchDeviceHostName failed:", e)
+    }
+    actionStatus = "Renaming channel " + (Number(index) + 1) + "…"
+    actionStatusTimer.restart()
+  }
+
   function setSetting(name, value, key) {
     if (!selectedDevice || selectedDevice.readonly) return
     ensureDaemon()

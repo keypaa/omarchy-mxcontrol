@@ -94,6 +94,7 @@ omarchy-shell shell hide io.github.zachwilke.mx
 
 - Button remaps
 - Divert / gesture keys (HID++ divert so Solaar rules can run)
+- Rename Easy Switch channels (names are stored on the device and show on every computer)
 - Keyboard Fn swap, backlight, platform, disable Caps/Win/Insert
 - Local profiles on this computer (`~/.config/omarchy-mx/profiles.json`) — not Logi cloud, Easy Switch channel is not stored
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.zachwilke.mx",
   "name": "MX Control",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": "Zach Wilke",
   "license": "GPL-2.0-or-later",
   "homepage": "https://github.com/zachwilke/omarchy-mxcontrol",

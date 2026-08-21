@@ -232,6 +232,13 @@ check("vertical hull", verticalBoard && verticalBoard.hull, "vertical")
 var ergoBoard = Model.divertLayout({ name: "MX Ergo", kind: "mouse" }, keysOf("80", "81", "82"))
 check("ergo hull", ergoBoard && ergoBoard.hull, "ergo")
 
+var renamed = Model.patchDeviceHostName(
+  [{ id: "mouse", hosts: [{ index: 0, name: "Old" }, { index: 1, name: "Two" }] }],
+  "mouse", 0, '<b>Desk</b>'
+)
+check("host rename patch escapes", renamed[0].hosts[0].name, "&lt;b&gt;Desk&lt;/b&gt;")
+check("host rename keeps others", renamed[0].hosts[1].name, "Two")
+
 if (fails) {
   console.error(fails + " failed")
   process.exit(1)
