@@ -416,6 +416,105 @@ def battery_payload(dev) -> dict | None:
     }
 
 
+POWER_SUPPLY_ROOT = Path("/sys/class/power_supply")
+
+# capacity_level fallback for devices that report coarse levels instead of a
+# percent. Approximations, only used when `capacity` is absent.
+CAPACITY_LEVEL_PERCENT = {
+    "full": 100,
+    "high": 80,
+    "normal": 55,
+    "low": 20,
+    "critical": 5,
+}
+
+
+def scan_power_supply(root: Path | None = None) -> list[dict]:
+    """Battery from the kernel's hid-logitech-hidpp driver. The kernel keeps
+    these nodes current from device battery events, so reading them costs a
+    few sysfs reads and zero HID++ radio traffic."""
+    root = POWER_SUPPLY_ROOT if root is None else root
+    supplies = []
+    if not root.is_dir():
+        return supplies
+    for entry in sorted(root.glob("hidpp_battery_*")):
+        def read(name: str) -> str:
+            try:
+                return (entry / name).read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                return ""
+
+        if read("online") == "0":
+            continue
+        level = None
+        try:
+            level = int(read("capacity"))
+        except ValueError:
+            pass
+        capacity_level = read("capacity_level").strip().lower()
+        if level is None:
+            level = CAPACITY_LEVEL_PERCENT.get(capacity_level)
+        if level is None:
+            continue
+        supplies.append(
+            {
+                "serial": read("serial_number"),
+                "model": read("model_name"),
+                "level": max(0, min(100, level)),
+                "status": read("status").lower(),
+            }
+        )
+    return supplies
+
+
+def battery_from_power_supply(supplies: list[dict], serial: str, name: str) -> dict | None:
+    want_serial = str(serial or "").strip().lower()
+    want_name = str(name or "").strip().lower()
+    for item in supplies:
+        have_serial = str(item.get("serial") or "").strip().lower()
+        have_model = str(item.get("model") or "").strip().lower()
+        matched = bool(want_serial and have_serial and want_serial == have_serial)
+        if not matched and want_name and have_model:
+            matched = want_name in have_model or have_model in want_name
+        if not matched:
+            continue
+        return {
+            "level": item["level"],
+            "status": item.get("status") or "",
+            "voltage": None,
+            "text": f"{item['level']}%",
+        }
+    return None
+
+
+def battery_differs(old, new) -> bool:
+    """Ignore voltage and status casing so sysfs and Solaar readings of the
+    same state do not ping-pong the published snapshot."""
+    old = old or {}
+    new = new or {}
+    if old.get("level") != new.get("level"):
+        return True
+    return str(old.get("status") or "").lower() != str(new.get("status") or "").lower()
+
+
+def attach_sysfs_batteries(devices: list[dict], supplies: list[dict]) -> None:
+    for item in devices:
+        battery = item.get("battery")
+        if isinstance(battery, dict) and battery.get("level") is not None:
+            continue
+        found = battery_from_power_supply(
+            supplies, item.get("serial") or item.get("unitId") or "", item.get("name") or ""
+        )
+        if found is not None:
+            item["battery"] = found
+
+
+def scan_hidraw_with_battery() -> tuple[list[dict], list[dict]]:
+    devices, adapters = scan_hidraw()
+    attach_sysfs_batteries(devices, scan_power_supply())
+    return devices, adapters
+
+
 HOSTS_INFO_FEATURE = 0x1815
 HOST_NAME_MAX = 32
 
@@ -1055,7 +1154,7 @@ def apply_setting(setting, key, value):
 
 
 def discover_payload() -> dict:
-    hid_devices, adapters = scan_hidraw()
+    hid_devices, adapters = scan_hidraw_with_battery()
     installed = solaar_available()
     visible = hid_devices + adapters
     return {
@@ -1178,7 +1277,7 @@ def collect_status(mods, opened, hid_devices, adapters, permission_error, full: 
 
 
 def status_command() -> None:
-    hid_devices, adapters = scan_hidraw()
+    hid_devices, adapters = scan_hidraw_with_battery()
     mods, import_error = import_solaar()
     installed = mods is not None
     if not installed:
@@ -1605,21 +1704,48 @@ def plan_cycle(cmds: list[dict], topology_changed: bool) -> dict:
     }
 
 
-def refresh_batteries(opened, payload: dict | None) -> bool:
-    """Idle heartbeat: one battery read per live device, no setting reads."""
+def refresh_batteries_sysfs(payload: dict | None) -> tuple[bool, set[str]]:
+    """Update battery from the kernel power_supply nodes. Cheap enough to run
+    on every serve wake; returns which device ids were covered so the HID++
+    fallback can skip them."""
+    devices = (payload or {}).get("devices") or []
+    if not devices:
+        return False, set()
+    supplies = scan_power_supply()
+    if not supplies:
+        return False, set()
+    changed = False
+    covered = set()
+    for item in devices:
+        battery = battery_from_power_supply(
+            supplies, item.get("serial") or item.get("unitId") or "", item.get("name") or ""
+        )
+        if battery is None:
+            continue
+        covered.add(str(item.get("id") or ""))
+        if battery_differs(item.get("battery"), battery):
+            item["battery"] = battery
+            changed = True
+    return changed, covered
+
+
+def refresh_batteries(opened, payload: dict | None, skip: set[str] | None = None) -> bool:
+    """HID++ heartbeat fallback: one battery read per live device the kernel
+    power_supply nodes did not cover. No setting reads."""
     devices = (payload or {}).get("devices") or []
     if not devices:
         return False
+    skip = skip or set()
     by_id = {device_id(dev): dev for dev in iter_devices(opened)}
     changed = False
     for item in devices:
-        if item.get("readonly"):
+        if item.get("readonly") or str(item.get("id") or "") in skip:
             continue
         dev = by_id.get(str(item.get("id") or ""))
         if dev is None or getattr(dev, "online", None) is False:
             continue
         battery = battery_payload(dev)
-        if battery is not None and battery != item.get("battery"):
+        if battery is not None and battery_differs(item.get("battery"), battery):
             item["battery"] = battery
             changed = True
     return changed
@@ -1645,7 +1771,7 @@ def serve_command() -> int:
         payload["profiles"] = load_profiles().get("profiles") or []
         write_status(status_path, payload, last_text)
 
-    hid_devices, adapters = scan_hidraw()
+    hid_devices, adapters = scan_hidraw_with_battery()
     topology = hidraw_topology()
     starting = discover_payload()
     starting["serving"] = True
@@ -1702,11 +1828,18 @@ def serve_command() -> int:
             next_topology = hidraw_topology()
             topology_changed = next_topology != topology
             if not cmds and not topology_changed:
-                # Battery drains while the snapshot sits idle; re-read it on a
-                # slow heartbeat so the level cannot go stale for hours.
+                # Battery must stay accurate while the snapshot sits idle.
+                # The kernel power_supply nodes are free to read, so check
+                # them on every wake (<=30s latency); the HID++ radio read
+                # runs on the slow heartbeat, and only for devices the
+                # kernel does not cover.
+                sysfs_changed, covered = refresh_batteries_sysfs(payload)
                 if time.monotonic() - last_heartbeat >= HEARTBEAT_SEC:
                     last_heartbeat = time.monotonic()
-                    refresh_batteries(opened, payload)
+                    refresh_batteries(opened, payload, skip=covered)
+                    payload["lastError"] = last_error
+                    publish(payload)
+                elif sysfs_changed:
                     payload["lastError"] = last_error
                     publish(payload)
                 continue
@@ -1721,7 +1854,7 @@ def serve_command() -> int:
                         last_error = ""
                     except Exception as exc:
                         last_error = str(exc)
-                hid_devices, adapters = scan_hidraw()
+                hid_devices, adapters = scan_hidraw_with_battery()
                 targets = set(plan["set_devices"])
                 if not plan["full"] and len(targets) == 1:
                     payload = refresh_one_device(

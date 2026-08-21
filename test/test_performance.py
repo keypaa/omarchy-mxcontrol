@@ -167,6 +167,79 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual([cmd["value"] for cmd in cmds], [400, 800, 1600])
         self.assertEqual(list(runtime.glob("cmd-*.json")), [])
 
+    def make_supply(self, name, **attrs):
+        folder = Path(self.xdg) / "power_supply" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        for key, value in attrs.items():
+            (folder / key).write_text(str(value) + "\n", encoding="utf-8")
+        return folder.parent
+
+    def test_scan_power_supply_reads_kernel_nodes(self):
+        root = self.make_supply(
+            "hidpp_battery_0",
+            capacity=85, status="Discharging", online=1,
+            serial_number="ab-cd-ef", model_name="Wireless Mouse MX Master 3S",
+        )
+        self.make_supply("hidpp_battery_1", capacity_level="Low", status="Discharging", online=1,
+                         serial_number="11-22-33", model_name="MX Keys")
+        self.make_supply("hidpp_battery_2", capacity=50, online=0,
+                         serial_number="off-li-ne", model_name="Gone")
+        self.make_supply("BAT0", capacity=99, online=1)
+        supplies = self.mxctl.scan_power_supply(root)
+        self.assertEqual(len(supplies), 2)
+        self.assertEqual(supplies[0]["level"], 85)
+        self.assertEqual(supplies[0]["status"], "discharging")
+        self.assertEqual(supplies[1]["level"], self.mxctl.CAPACITY_LEVEL_PERCENT["low"])
+
+    def test_battery_from_power_supply_matching(self):
+        supplies = [
+            {"serial": "AB-CD-EF", "model": "Wireless Mouse MX Master 3S", "level": 85, "status": "discharging"},
+            {"serial": "11-22-33", "model": "MX Keys", "level": 40, "status": "charging"},
+        ]
+        by_serial = self.mxctl.battery_from_power_supply(supplies, "ab-cd-ef", "")
+        self.assertEqual(by_serial["level"], 85)
+        self.assertEqual(by_serial["text"], "85%")
+        by_name = self.mxctl.battery_from_power_supply(supplies, "", "MX Master 3S")
+        self.assertEqual(by_name["level"], 85)
+        self.assertIsNone(self.mxctl.battery_from_power_supply(supplies, "zz-zz", "MX Vertical"))
+
+    def test_battery_differs_ignores_voltage_and_case(self):
+        old = {"level": 85, "status": "Discharging", "voltage": 3900}
+        self.assertFalse(self.mxctl.battery_differs(old, {"level": 85, "status": "discharging", "voltage": None}))
+        self.assertTrue(self.mxctl.battery_differs(old, {"level": 84, "status": "discharging"}))
+        self.assertTrue(self.mxctl.battery_differs(old, {"level": 85, "status": "charging"}))
+
+    def test_attach_sysfs_batteries_fills_gaps_only(self):
+        supplies = [{"serial": "ab-cd", "model": "MX Master 3S", "level": 70, "status": "discharging"}]
+        devices = [
+            {"id": "solaar", "serial": "ab-cd", "name": "MX Master 3S", "battery": {"level": 68}},
+            {"id": "hidraw", "serial": "ab-cd", "name": "MX Master 3S", "battery": None},
+        ]
+        self.mxctl.attach_sysfs_batteries(devices, supplies)
+        self.assertEqual(devices[0]["battery"]["level"], 68)
+        self.assertEqual(devices[1]["battery"]["level"], 70)
+
+    def test_refresh_batteries_sysfs_updates_and_covers(self):
+        root = self.make_supply(
+            "hidpp_battery_0",
+            capacity=61, status="Charging", online=1,
+            serial_number="ab-cd", model_name="MX Master 3S",
+        )
+        self.mxctl.POWER_SUPPLY_ROOT = root
+        payload = {"devices": [
+            {"id": "mouse", "serial": "ab-cd", "name": "MX Master 3S", "battery": {"level": 62, "status": "discharging"}},
+            {"id": "keys", "serial": "zz-zz", "name": "MX Keys", "battery": {"level": 30}},
+        ]}
+        changed, covered = self.mxctl.refresh_batteries_sysfs(payload)
+        self.assertTrue(changed)
+        self.assertEqual(covered, {"mouse"})
+        self.assertEqual(payload["devices"][0]["battery"]["level"], 61)
+        self.assertEqual(payload["devices"][0]["battery"]["status"], "charging")
+        self.assertEqual(payload["devices"][1]["battery"]["level"], 30)
+        changed, covered = self.mxctl.refresh_batteries_sysfs(payload)
+        self.assertFalse(changed)
+        self.assertEqual(covered, {"mouse"})
+
     def test_sanitize_host_name(self):
         self.assertEqual(self.mxctl.sanitize_host_name("  Desk   PC "), "Desk PC")
         self.assertEqual(self.mxctl.sanitize_host_name('<b>Desk</b>'), "bDesk/b")

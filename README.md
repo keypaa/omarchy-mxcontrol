@@ -168,6 +168,8 @@ python3 mxctl.py cleanup
 python3 -m unittest discover -s test -v
 ```
 
+Battery: readings come from the kernel's `hidpp_battery_*` power-supply nodes first — the kernel keeps them current from device battery events, so they are fresh at zero HID++ radio cost and work for every connection type, even before the helper ever runs. While the helper is serving it re-checks them on every wake (≤30 s) and publishes on change; the HID++ radio read remains only as a slow fallback for devices the kernel does not cover. Bluetooth devices additionally get the BlueZ battery overlay as a last resort.
+
 Idle cost: the bar path only scans sysfs (no Solaar import, no hidraw open). The manifest declares a `service` entry point, so the shell instantiates **one shared Service** for the whole plugin — every monitor's bar widget and the settings window drive the same helper, device selection, and snapshot. On shells without plugin services, each widget falls back to a local instance (passive except for one active owner). After you open the panel the helper blocks on inotify for spooled `cmd-*.json` files and hidraw plug events; a 60-second heartbeat re-reads only the battery and stamps the snapshot fresh. Initial reads stream: the helper publishes after every HID++ setting read, so the first controls paint while the rest of the burst is still running.
 
 Saved files under `~/.config/omarchy/plugins/io.github.zachwilke.mx/` reload automatically. If a change looks stale:
